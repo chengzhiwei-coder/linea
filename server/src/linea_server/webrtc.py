@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from fractions import Fraction
@@ -39,27 +40,87 @@ class SilentAudioTrack(MediaStreamTrack):
 
     async def recv(self) -> AudioFrame:
         await asyncio.sleep(self._samples_per_frame / self._sample_rate)
-        frame = AudioFrame(format="s16", layout="mono", samples=self._samples_per_frame)
-        for plane in frame.planes:
-            plane.update(bytes(plane.buffer_size))
-        frame.pts = self._timestamp
-        frame.sample_rate = self._sample_rate
-        frame.time_base = Fraction(1, self._sample_rate)
+        frame = make_pcm16_audio_frame(
+            bytes(self._samples_per_frame * 2),
+            sample_rate=self._sample_rate,
+            pts=self._timestamp,
+        )
         self._timestamp += self._samples_per_frame
+        return frame
+
+
+def audio_frame_to_pcm16(frame: AudioFrame) -> bytes:
+    """Return the frame's packed PCM bytes for the xAI realtime bridge."""
+
+    return b"".join(bytes(plane) for plane in frame.planes)
+
+
+def make_pcm16_audio_frame(pcm16: bytes, *, sample_rate: int = 48_000, pts: int = 0) -> AudioFrame:
+    samples = max(1, len(pcm16) // 2)
+    frame = AudioFrame(format="s16", layout="mono", samples=samples)
+    frame.planes[0].update(pcm16[: frame.planes[0].buffer_size].ljust(frame.planes[0].buffer_size, b"\x00"))
+    frame.pts = pts
+    frame.sample_rate = sample_rate
+    frame.time_base = Fraction(1, sample_rate)
+    return frame
+
+
+AudioSink = Callable[[bytes], Awaitable[None]]
+AudioSource = Callable[[], Awaitable[bytes | None]]
+
+
+class PcmOutputAudioTrack(MediaStreamTrack):
+    """Server audio track backed by PCM16 bytes from the xAI realtime bridge."""
+
+    kind = "audio"
+
+    def __init__(self, audio_source: AudioSource, *, sample_rate: int = 48_000) -> None:
+        super().__init__()
+        self._audio_source = audio_source
+        self._sample_rate = sample_rate
+        self._timestamp = 0
+        self._samples_per_frame = 960
+
+    async def recv(self) -> AudioFrame:
+        pcm16 = await self._audio_source()
+        if pcm16 is None:
+            pcm16 = bytes(self._samples_per_frame * 2)
+            await asyncio.sleep(self._samples_per_frame / self._sample_rate)
+        frame = make_pcm16_audio_frame(pcm16, sample_rate=self._sample_rate, pts=self._timestamp)
+        self._timestamp += frame.samples
         return frame
 
 
 class AiortcWebRtcService:
     """aiortc-backed WebRTC answer service for REST SDP offer/answer signaling."""
 
-    def __init__(self, *, ice_gathering_timeout_seconds: float = 2.0) -> None:
+    def __init__(
+        self,
+        *,
+        ice_gathering_timeout_seconds: float = 2.0,
+        audio_sink: AudioSink | None = None,
+        audio_source: AudioSource | None = None,
+    ) -> None:
         self._ice_gathering_timeout_seconds = ice_gathering_timeout_seconds
+        self._audio_sink = audio_sink
+        self._audio_source = audio_source
         self._peer_connections: set[RTCPeerConnection] = set()
+        self._track_tasks: set[asyncio.Task[None]] = set()
 
     async def create_answer(self, offer_sdp: str) -> SdpAnswer:
         peer_connection = RTCPeerConnection()
         self._peer_connections.add(peer_connection)
-        peer_connection.addTrack(SilentAudioTrack())
+        if self._audio_source is None:
+            peer_connection.addTrack(SilentAudioTrack())
+        else:
+            peer_connection.addTrack(PcmOutputAudioTrack(self._audio_source))
+
+        @peer_connection.on("track")
+        def on_track(track: MediaStreamTrack) -> None:
+            if track.kind == "audio" and self._audio_sink is not None:
+                task = asyncio.create_task(self._consume_audio_track(track, self._audio_sink))
+                self._track_tasks.add(task)
+                task.add_done_callback(self._track_tasks.discard)
 
         await peer_connection.setRemoteDescription(
             RTCSessionDescription(sdp=offer_sdp, type="offer")
@@ -72,11 +133,22 @@ class AiortcWebRtcService:
         return SdpAnswer(type=local_description.type, sdp=local_description.sdp)
 
     async def close(self) -> None:
+        for task in list(self._track_tasks):
+            task.cancel()
+        if self._track_tasks:
+            await asyncio.gather(*self._track_tasks, return_exceptions=True)
+        self._track_tasks.clear()
+
         peer_connections = list(self._peer_connections)
         self._peer_connections.clear()
         await asyncio.gather(
             *(peer_connection.close() for peer_connection in peer_connections), return_exceptions=True
         )
+
+    async def _consume_audio_track(self, track: MediaStreamTrack, audio_sink: AudioSink) -> None:
+        while True:
+            frame = await track.recv()
+            await audio_sink(audio_frame_to_pcm16(frame))
 
     async def _wait_for_ice_gathering(self, peer_connection: RTCPeerConnection) -> None:
         if peer_connection.iceGatheringState == "complete":

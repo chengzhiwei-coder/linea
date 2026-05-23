@@ -1,4 +1,10 @@
-from typing import Any
+import asyncio
+import base64
+import json
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, Protocol
+
+from websockets.asyncio.client import ClientConnection, connect
 
 from linea_server.xai_config import XaiConfig
 
@@ -15,6 +21,10 @@ TIME_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
+class XaiRealtimeError(RuntimeError):
+    """Raised when xAI realtime reports a fatal provider error."""
+
+
 def build_session_update(config: XaiConfig) -> dict[str, Any]:
     return {
         "type": "session.update",
@@ -23,20 +33,132 @@ def build_session_update(config: XaiConfig) -> dict[str, Any]:
             "voice": config.voice,
             "instructions": "You are Linea, Anton's concise realtime voice assistant.",
             "turn_detection": {"type": "server_vad"},
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
             "tools": [TIME_TOOL_SCHEMA],
         },
     }
 
 
 class XaiRealtimeClient:
-    """Thin boundary around xAI's realtime WebSocket API.
-
-    The real connect/send/receive loop lands later after WebRTC frame plumbing exists.
-    Keep this class small and easy to fake in tests.
-    """
+    """Thin boundary around xAI's realtime WebSocket API."""
 
     def __init__(self, config: XaiConfig) -> None:
         self.config = config
 
     def authorization_header(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.config.api_key}"}
+
+
+class RealtimeConnection(Protocol):
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        """Send one JSON event to the realtime provider."""
+        ...
+
+    def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
+        """Yield decoded JSON events from the realtime provider."""
+        ...
+
+    async def close(self) -> None:
+        """Close the underlying provider transport."""
+        ...
+
+
+class WebSocketRealtimeConnection:
+    """JSON event adapter around the xAI realtime WebSocket connection."""
+
+    def __init__(self, websocket: ClientConnection) -> None:
+        self._websocket = websocket
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        await self._websocket.send(json.dumps(payload))
+
+    async def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
+        async for message in self._websocket:
+            if isinstance(message, bytes):
+                message = message.decode("utf-8")
+            yield json.loads(message)
+
+    async def close(self) -> None:
+        await self._websocket.close()
+
+
+ConnectionFactory = Callable[[XaiConfig], Awaitable[RealtimeConnection]]
+
+
+async def connect_xai_realtime(config: XaiConfig) -> RealtimeConnection:
+    websocket = await connect(
+        config.realtime_url,
+        additional_headers=XaiRealtimeClient(config).authorization_header(),
+    )
+    return WebSocketRealtimeConnection(websocket)
+
+
+class XaiRealtimeBridge:
+    """Bridge PCM16 audio frames between WebRTC plumbing and xAI realtime events.
+
+    The WebRTC layer owns capture/playback. This class owns the xAI session lifecycle and the
+    provider event names: PCM16 bytes are sent as input_audio_buffer.append events, and xAI
+    response.audio.delta events are decoded into PCM16 bytes for the WebRTC output side.
+    """
+
+    def __init__(
+        self,
+        config: XaiConfig,
+        *,
+        connection: RealtimeConnection | None = None,
+        connection_factory: ConnectionFactory = connect_xai_realtime,
+    ) -> None:
+        self._config = config
+        self._connection = connection
+        self._connection_factory = connection_factory
+        self._start_lock = asyncio.Lock()
+        self._started = False
+        self._closed = False
+        self._audio_output: asyncio.Queue[bytes] = asyncio.Queue()
+
+    async def start(self) -> None:
+        async with self._start_lock:
+            if self._closed:
+                raise RuntimeError("xAI realtime bridge is closed")
+            if self._started:
+                return
+            if self._connection is None:
+                self._connection = await self._connection_factory(self._config)
+            await self._connection.send_json(build_session_update(self._config))
+            self._started = True
+
+    async def send_audio_frame(self, pcm16: bytes) -> None:
+        await self.start()
+        assert self._connection is not None
+        await self._connection.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pcm16).decode("ascii"),
+            }
+        )
+
+    async def process_events(self) -> None:
+        await self.start()
+        assert self._connection is not None
+        async for event in self._connection:
+            event_type = event.get("type")
+            if event_type == "response.audio.delta":
+                encoded_audio = event.get("delta")
+                if isinstance(encoded_audio, str):
+                    await self._audio_output.put(base64.b64decode(encoded_audio))
+            elif event_type == "error":
+                await self.close()
+                raise XaiRealtimeError(str(event.get("error") or event))
+
+    async def receive_audio_frame(self) -> bytes | None:
+        if self._audio_output.empty():
+            return None
+        return self._audio_output.get_nowait()
+
+    async def close(self) -> None:
+        self._closed = True
+        self._started = False
+        if self._connection is not None:
+            await self._connection.close()
+            self._connection = None
