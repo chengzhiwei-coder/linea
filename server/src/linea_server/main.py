@@ -15,7 +15,7 @@ def main() -> None:
     logger.info("Linea server startup host=%s port=%s", HOST, PORT)
     app = create_app()
     if app.state.initial_server_token is not None:
-        logger.info("New Linea server token: %s", app.state.initial_server_token)
+        logger.info("Linea server token: %s", app.state.initial_server_token)
     try:
         uvicorn.run(app, host=HOST, port=PORT)
     finally:

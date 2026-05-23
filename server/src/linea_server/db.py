@@ -27,11 +27,19 @@ def initialize_db(db_path: Path = DEFAULT_DB_PATH) -> InitializeDbResult:
             """
             CREATE TABLE IF NOT EXISTS server_auth (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                token TEXT,
                 token_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(server_auth)").fetchall()
+        }
+        if "token" not in columns:
+            conn.execute("ALTER TABLE server_auth ADD COLUMN token TEXT")
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tool_calls (
@@ -45,14 +53,23 @@ def initialize_db(db_path: Path = DEFAULT_DB_PATH) -> InitializeDbResult:
             """
         )
 
-        existing = conn.execute("SELECT 1 FROM server_auth WHERE id = 1").fetchone()
+        existing = conn.execute("SELECT token FROM server_auth WHERE id = 1").fetchone()
         if existing is not None:
-            return InitializeDbResult(False, None)
+            if existing[0] is not None:
+                return InitializeDbResult(False, existing[0])
+
+            token = secrets.token_urlsafe(32)
+            conn.execute(
+                "UPDATE server_auth SET token = ?, token_hash = ? WHERE id = 1",
+                (token, hash_token(token)),
+            )
+            conn.commit()
+            return InitializeDbResult(False, token)
 
         token = secrets.token_urlsafe(32)
         conn.execute(
-            "INSERT INTO server_auth (id, token_hash) VALUES (1, ?)",
-            (hash_token(token),),
+            "INSERT INTO server_auth (id, token, token_hash) VALUES (1, ?, ?)",
+            (token, hash_token(token)),
         )
         conn.commit()
 

@@ -16,9 +16,9 @@ Defaults:
 - local URL: `http://localhost:8787` from the same machine
 - SQLite: `data/linea.db`
 
-On first startup the server initializes SQLite and logs a new server bearer token once. Keep that plaintext token in your local password manager or development notes. After the first initialization, only the token hash is stored in SQLite and the plaintext token is not printed again.
+On startup the server initializes SQLite if needed and logs the server bearer token. Keep that plaintext token in your local password manager or development notes. The token and its hash are stored in SQLite so restarts can print the same token again.
 
-If you lose the local development token, stop the server, delete `data/linea.db`, and restart to generate a new database and token.
+If you want to rotate the local development token, stop the server, delete `data/linea.db`, and restart to generate a new database and token. Older hash-only development databases are migrated by generating and printing a replacement token.
 
 ## Authentication
 

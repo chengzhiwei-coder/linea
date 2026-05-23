@@ -25,7 +25,7 @@ Defaults:
 - authenticated check: `GET /auth/check` with `Authorization: Bearer <server-token>`;
 - WebRTC call setup: `POST /webrtc/offer` with an SDP offer and bearer auth.
 
-On first startup, the server creates `server/data/linea.db` and logs a new server bearer token once. Store that token locally; later restarts persist only its hash and do not print the plaintext token again.
+On startup, the server creates `server/data/linea.db` if needed and logs the server bearer token. Store that token locally; restarts print the same token again because the local SQLite database persists it with its hash.
 
 ## Documentation
 
