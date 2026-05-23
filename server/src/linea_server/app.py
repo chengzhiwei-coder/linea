@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from linea_server.auth import require_bearer_auth
 from linea_server.calls import CallManager, WebRtcOfferRequest, WebRtcOfferResponse
 from linea_server.db import DEFAULT_DB_PATH, initialize_db
-from linea_server.webrtc import StubWebRtcService
+from linea_server.webrtc import AiortcWebRtcService
 
 
 def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
@@ -15,7 +15,7 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
     app.state.db_path = db_path
     app.state.initial_server_token = init_result.plaintext_server_token
     app.state.call_manager = CallManager()
-    app.state.webrtc_service = StubWebRtcService()
+    app.state.webrtc_service = AiortcWebRtcService()
 
     @app.get("/health")
     async def health() -> dict[str, bool]:

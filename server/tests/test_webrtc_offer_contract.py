@@ -1,6 +1,24 @@
+from aiortc import RTCPeerConnection
 from httpx import ASGITransport, AsyncClient
 
 from linea_server.app import create_app
+
+
+async def create_audio_offer_sdp() -> str:
+    client = RTCPeerConnection()
+    client.addTransceiver("audio", direction="recvonly")
+    offer = await client.createOffer()
+    await client.setLocalDescription(offer)
+    try:
+        return client.localDescription.sdp
+    finally:
+        await client.close()
+
+
+async def close_webrtc_service(app) -> None:
+    close = getattr(app.state.webrtc_service, "close", None)
+    if close is not None:
+        await close()
 
 
 async def test_webrtc_offer_requires_auth(tmp_path):
@@ -10,6 +28,7 @@ async def test_webrtc_offer_requires_auth(tmp_path):
         response = await client.post("/webrtc/offer", json={"type": "offer", "sdp": "fake"})
 
     assert response.status_code == 401
+    await close_webrtc_service(app)
 
 
 async def test_webrtc_offer_validates_payload(tmp_path):
@@ -24,31 +43,35 @@ async def test_webrtc_offer_validates_payload(tmp_path):
         )
 
     assert response.status_code == 422
+    await close_webrtc_service(app)
 
 
-async def test_webrtc_offer_returns_stub_answer_for_valid_offer(tmp_path):
+async def test_webrtc_offer_returns_real_answer_for_valid_offer(tmp_path):
     app = create_app(db_path=tmp_path / "linea.db")
     token = app.state.initial_server_token
+    offer_sdp = await create_audio_offer_sdp()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/webrtc/offer",
             headers={"Authorization": f"Bearer {token}"},
-            json={"type": "offer", "sdp": "fake-sdp"},
+            json={"type": "offer", "sdp": offer_sdp},
         )
 
     assert response.status_code == 200
     body = response.json()
     assert body["type"] == "answer"
     assert body["call_id"]
-    assert isinstance(body["sdp"], str)
+    assert "m=audio" in body["sdp"]
+    assert "stub-answer-sdp" not in body["sdp"]
+    await close_webrtc_service(app)
 
 
 async def test_webrtc_offer_rejects_second_active_call(tmp_path):
     app = create_app(db_path=tmp_path / "linea.db")
     token = app.state.initial_server_token
     headers = {"Authorization": f"Bearer {token}"}
-    payload = {"type": "offer", "sdp": "fake-sdp"}
+    payload = {"type": "offer", "sdp": await create_audio_offer_sdp()}
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post("/webrtc/offer", headers=headers, json=payload)
@@ -56,6 +79,7 @@ async def test_webrtc_offer_rejects_second_active_call(tmp_path):
 
     assert first.status_code == 200
     assert second.status_code == 409
+    await close_webrtc_service(app)
 
 
 async def test_webrtc_offer_releases_reserved_call_when_answer_creation_fails(tmp_path):
