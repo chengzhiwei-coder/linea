@@ -3,8 +3,8 @@ from httpx import ASGITransport, AsyncClient
 from linea_server.app import create_app
 
 
-async def test_health_is_public_liveness_endpoint():
-    app = create_app()
+async def test_health_is_public_liveness_endpoint(tmp_path):
+    app = create_app(db_path=tmp_path / "linea.db")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/health")
