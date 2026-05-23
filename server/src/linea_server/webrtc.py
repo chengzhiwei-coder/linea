@@ -67,6 +67,7 @@ def make_pcm16_audio_frame(pcm16: bytes, *, sample_rate: int = 48_000, pts: int 
 
 AudioSink = Callable[[bytes], Awaitable[None]]
 AudioSource = Callable[[], Awaitable[bytes | None]]
+ActivityRecorder = Callable[[], None]
 
 
 class PcmOutputAudioTrack(MediaStreamTrack):
@@ -74,10 +75,17 @@ class PcmOutputAudioTrack(MediaStreamTrack):
 
     kind = "audio"
 
-    def __init__(self, audio_source: AudioSource, *, sample_rate: int = 48_000) -> None:
+    def __init__(
+        self,
+        audio_source: AudioSource,
+        *,
+        sample_rate: int = 48_000,
+        record_activity: ActivityRecorder | None = None,
+    ) -> None:
         super().__init__()
         self._audio_source = audio_source
         self._sample_rate = sample_rate
+        self._record_activity = record_activity
         self._timestamp = 0
         self._samples_per_frame = 960
 
@@ -86,6 +94,8 @@ class PcmOutputAudioTrack(MediaStreamTrack):
         if pcm16 is None:
             pcm16 = bytes(self._samples_per_frame * 2)
             await asyncio.sleep(self._samples_per_frame / self._sample_rate)
+        elif self._record_activity is not None:
+            self._record_activity()
         frame = make_pcm16_audio_frame(pcm16, sample_rate=self._sample_rate, pts=self._timestamp)
         self._timestamp += frame.samples
         return frame
@@ -100,10 +110,12 @@ class AiortcWebRtcService:
         ice_gathering_timeout_seconds: float = 2.0,
         audio_sink: AudioSink | None = None,
         audio_source: AudioSource | None = None,
+        record_activity: ActivityRecorder | None = None,
     ) -> None:
         self._ice_gathering_timeout_seconds = ice_gathering_timeout_seconds
         self._audio_sink = audio_sink
         self._audio_source = audio_source
+        self._record_activity = record_activity
         self._peer_connections: set[RTCPeerConnection] = set()
         self._track_tasks: set[asyncio.Task[None]] = set()
 
@@ -113,12 +125,16 @@ class AiortcWebRtcService:
         if self._audio_source is None:
             peer_connection.addTrack(SilentAudioTrack())
         else:
-            peer_connection.addTrack(PcmOutputAudioTrack(self._audio_source))
+            peer_connection.addTrack(
+                PcmOutputAudioTrack(self._audio_source, record_activity=self._record_activity)
+            )
 
         @peer_connection.on("track")
         def on_track(track: MediaStreamTrack) -> None:
             if track.kind == "audio" and self._audio_sink is not None:
-                task = asyncio.create_task(self._consume_audio_track(track, self._audio_sink))
+                task = asyncio.create_task(
+                    self._consume_audio_track(track, self._audio_sink, self._record_activity)
+                )
                 self._track_tasks.add(task)
                 task.add_done_callback(self._track_tasks.discard)
 
@@ -145,10 +161,22 @@ class AiortcWebRtcService:
             *(peer_connection.close() for peer_connection in peer_connections), return_exceptions=True
         )
 
-    async def _consume_audio_track(self, track: MediaStreamTrack, audio_sink: AudioSink) -> None:
-        while True:
+    async def _consume_audio_track(
+        self,
+        track: MediaStreamTrack,
+        audio_sink: AudioSink,
+        record_activity: ActivityRecorder | None = None,
+        *,
+        max_frames: int | None = None,
+    ) -> None:
+        frames_consumed = 0
+        activity_recorder = record_activity or self._record_activity
+        while max_frames is None or frames_consumed < max_frames:
             frame = await track.recv()
             await audio_sink(audio_frame_to_pcm16(frame))
+            if activity_recorder is not None:
+                activity_recorder()
+            frames_consumed += 1
 
     async def _wait_for_ice_gathering(self, peer_connection: RTCPeerConnection) -> None:
         if peer_connection.iceGatheringState == "complete":

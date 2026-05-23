@@ -88,6 +88,7 @@ class WebSocketRealtimeConnection:
         await self._websocket.close()
 
 
+ActivityRecorder = Callable[[], None]
 ConnectionFactory = Callable[[XaiConfig], Awaitable[RealtimeConnection]]
 ToolCallActivePredicate = Callable[[str], bool]
 
@@ -134,6 +135,7 @@ class XaiRealtimeBridge:
         db_path: Path = DEFAULT_DB_PATH,
         tool_registry: ToolRegistry | None = None,
         is_tool_call_active: ToolCallActivePredicate = lambda call_id: False,
+        record_activity: ActivityRecorder | None = None,
     ) -> None:
         self._config = config
         self._connection = connection
@@ -143,6 +145,7 @@ class XaiRealtimeBridge:
         if tool_registry is None:
             register_default_tools(self._tool_registry)
         self._is_tool_call_active = is_tool_call_active
+        self._record_activity = record_activity
         self._start_lock = asyncio.Lock()
         self._started = False
         self._closed = False
@@ -157,6 +160,7 @@ class XaiRealtimeBridge:
             if self._connection is None:
                 self._connection = await self._connection_factory(self._config)
             await self._connection.send_json(build_session_update(self._config))
+            self._record_call_activity()
             self._started = True
 
     async def send_audio_frame(self, pcm16: bytes) -> None:
@@ -168,11 +172,13 @@ class XaiRealtimeBridge:
                 "audio": base64.b64encode(pcm16).decode("ascii"),
             }
         )
+        self._record_call_activity()
 
     async def process_events(self) -> None:
         await self.start()
         assert self._connection is not None
         async for event in self._connection:
+            self._record_call_activity()
             event_type = event.get("type")
             if event_type == "response.audio.delta":
                 encoded_audio = event.get("delta")
@@ -183,6 +189,10 @@ class XaiRealtimeBridge:
                 raise XaiRealtimeError(str(event.get("error") or event))
             elif tool_call := parse_tool_call_event(event):
                 await self._handle_tool_call(tool_call)
+
+    def _record_call_activity(self) -> None:
+        if self._record_activity is not None:
+            self._record_activity()
 
     async def _handle_tool_call(self, tool_call: XaiToolCallRequest) -> None:
         assert self._connection is not None
@@ -210,7 +220,9 @@ class XaiRealtimeBridge:
                 },
             }
         )
+        self._record_call_activity()
         await self._connection.send_json({"type": "response.create"})
+        self._record_call_activity()
 
     async def receive_audio_frame(self) -> bytes | None:
         if self._audio_output.empty():
