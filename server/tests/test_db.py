@@ -34,3 +34,15 @@ def test_initialize_db_stores_server_token_hash_only(tmp_path):
 
     assert row == (hash_token(result.plaintext_server_token),)
     assert plaintext_matches is None
+
+
+def test_initialize_db_only_returns_plaintext_token_once(tmp_path):
+    db_path = tmp_path / "linea.db"
+
+    first = initialize_db(db_path)
+    second = initialize_db(db_path)
+
+    assert first.created_new_server_token is True
+    assert first.plaintext_server_token is not None
+    assert second.created_new_server_token is False
+    assert second.plaintext_server_token is None
