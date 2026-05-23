@@ -2,10 +2,15 @@ import asyncio
 import base64
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from websockets.asyncio.client import ClientConnection, connect
 
+from linea_server.db import DEFAULT_DB_PATH
+from linea_server.tool_logs import finish_tool_call, start_tool_call
+from linea_server.tools import ToolRegistry, register_default_tools
 from linea_server.xai_config import XaiConfig
 
 
@@ -84,6 +89,13 @@ class WebSocketRealtimeConnection:
 
 
 ConnectionFactory = Callable[[XaiConfig], Awaitable[RealtimeConnection]]
+ToolCallActivePredicate = Callable[[str], bool]
+
+
+@dataclass(frozen=True)
+class XaiToolCallRequest:
+    call_id: str
+    name: str
 
 
 async def connect_xai_realtime(config: XaiConfig) -> RealtimeConnection:
@@ -92,6 +104,17 @@ async def connect_xai_realtime(config: XaiConfig) -> RealtimeConnection:
         additional_headers=XaiRealtimeClient(config).authorization_header(),
     )
     return WebSocketRealtimeConnection(websocket)
+
+
+def parse_tool_call_event(event: dict[str, Any]) -> XaiToolCallRequest | None:
+    if event.get("type") != "response.function_call_arguments.done":
+        return None
+
+    name = event.get("name")
+    call_id = event.get("call_id")
+    if not isinstance(name, str) or not isinstance(call_id, str):
+        return None
+    return XaiToolCallRequest(call_id=call_id, name=name)
 
 
 class XaiRealtimeBridge:
@@ -108,10 +131,18 @@ class XaiRealtimeBridge:
         *,
         connection: RealtimeConnection | None = None,
         connection_factory: ConnectionFactory = connect_xai_realtime,
+        db_path: Path = DEFAULT_DB_PATH,
+        tool_registry: ToolRegistry | None = None,
+        is_tool_call_active: ToolCallActivePredicate = lambda call_id: False,
     ) -> None:
         self._config = config
         self._connection = connection
         self._connection_factory = connection_factory
+        self._db_path = db_path
+        self._tool_registry = tool_registry or ToolRegistry()
+        if tool_registry is None:
+            register_default_tools(self._tool_registry)
+        self._is_tool_call_active = is_tool_call_active
         self._start_lock = asyncio.Lock()
         self._started = False
         self._closed = False
@@ -150,6 +181,36 @@ class XaiRealtimeBridge:
             elif event_type == "error":
                 await self.close()
                 raise XaiRealtimeError(str(event.get("error") or event))
+            elif tool_call := parse_tool_call_event(event):
+                await self._handle_tool_call(tool_call)
+
+    async def _handle_tool_call(self, tool_call: XaiToolCallRequest) -> None:
+        assert self._connection is not None
+        tool_call_id = start_tool_call(self._db_path, tool_call.call_id, tool_call.name)
+        try:
+            result = await self._tool_registry.call(tool_call.name)
+        except asyncio.CancelledError:
+            finish_tool_call(self._db_path, tool_call_id, "cancelled")
+            raise
+        except Exception:
+            finish_tool_call(self._db_path, tool_call_id, "error")
+            return
+
+        finish_tool_call(self._db_path, tool_call_id, "success")
+        if not self._is_tool_call_active(tool_call.call_id):
+            return
+
+        await self._connection.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": tool_call.call_id,
+                    "output": result,
+                },
+            }
+        )
+        await self._connection.send_json({"type": "response.create"})
 
     async def receive_audio_frame(self) -> bytes | None:
         if self._audio_output.empty():
