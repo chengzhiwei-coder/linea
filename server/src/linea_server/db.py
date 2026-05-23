@@ -1,0 +1,59 @@
+from dataclasses import dataclass
+from pathlib import Path
+import hashlib
+import secrets
+import sqlite3
+
+
+DEFAULT_DB_PATH = Path("data/linea.db")
+
+
+@dataclass(frozen=True)
+class InitializeDbResult:
+    created_new_server_token: bool
+    plaintext_server_token: str | None
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def initialize_db(db_path: Path = DEFAULT_DB_PATH) -> InitializeDbResult:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS server_auth (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                token_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tool_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('started', 'success', 'error', 'cancelled')),
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at TEXT
+            )
+            """
+        )
+
+        existing = conn.execute("SELECT 1 FROM server_auth WHERE id = 1").fetchone()
+        if existing is not None:
+            return InitializeDbResult(False, None)
+
+        token = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO server_auth (id, token_hash) VALUES (1, ?)",
+            (hash_token(token),),
+        )
+        conn.commit()
+
+    return InitializeDbResult(True, token)
