@@ -56,3 +56,25 @@ async def test_webrtc_offer_rejects_second_active_call(tmp_path):
 
     assert first.status_code == 200
     assert second.status_code == 409
+
+
+async def test_webrtc_offer_releases_reserved_call_when_answer_creation_fails(tmp_path):
+    class FailingWebRtcService:
+        async def create_answer(self, offer_sdp: str):
+            _ = offer_sdp
+            raise RuntimeError("answer failed")
+
+    app = create_app(db_path=tmp_path / "linea.db")
+    app.state.webrtc_service = FailingWebRtcService()
+    token = app.state.initial_server_token
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"type": "offer", "sdp": "fake-sdp"}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        failed = await client.post("/webrtc/offer", headers=headers, json=payload)
+
+    assert failed.status_code == 500
+    assert app.state.call_manager.active_call_id is None

@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from linea_server.auth import require_bearer_auth
 from linea_server.calls import CallManager, WebRtcOfferRequest, WebRtcOfferResponse
 from linea_server.db import DEFAULT_DB_PATH, initialize_db
+from linea_server.webrtc import StubWebRtcService
 
 
 def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
@@ -14,6 +15,7 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
     app.state.db_path = db_path
     app.state.initial_server_token = init_result.plaintext_server_token
     app.state.call_manager = CallManager()
+    app.state.webrtc_service = StubWebRtcService()
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
@@ -29,10 +31,17 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
         dependencies=[Depends(require_bearer_auth)],
     )
     async def webrtc_offer(offer: WebRtcOfferRequest) -> WebRtcOfferResponse:
-        _ = offer
         try:
-            return app.state.call_manager.start_placeholder_call()
+            call_id = app.state.call_manager.reserve_call()
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+        try:
+            answer = await app.state.webrtc_service.create_answer(offer.sdp)
+        except Exception:
+            app.state.call_manager.release_call(call_id)
+            raise
+
+        return WebRtcOfferResponse(type=answer.type, sdp=answer.sdp, call_id=call_id)
 
     return app

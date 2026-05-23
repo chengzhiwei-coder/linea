@@ -19,12 +19,12 @@ class WebRtcOfferResponse(BaseModel):
 class CallManager:
     active_call_id: str | None = None
 
-    def start_placeholder_call(self) -> WebRtcOfferResponse:
+    def reserve_call(self) -> str:
         if self.active_call_id is not None:
             raise RuntimeError("call already active")
         self.active_call_id = str(uuid4())
-        return WebRtcOfferResponse(
-            type="answer",
-            sdp="stub-answer-sdp",
-            call_id=self.active_call_id,
-        )
+        return self.active_call_id
+
+    def release_call(self, call_id: str) -> None:
+        if self.active_call_id == call_id:
+            self.active_call_id = None
