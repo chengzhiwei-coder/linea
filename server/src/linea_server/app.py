@@ -53,18 +53,12 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
     app.state.db_path = db_path
     app.state.initial_server_token = init_result.plaintext_server_token
     app.state.call_manager = CallManager()
-    try:
-        app.state.xai_config = load_xai_config()
-    except RuntimeError:
-        app.state.xai_config = None
-        app.state.xai_bridge = None
-        app.state.webrtc_service = AiortcWebRtcService()
-    else:
-        app.state.xai_bridge = XaiRealtimeBridge(app.state.xai_config)
-        app.state.webrtc_service = AiortcWebRtcService(
-            audio_sink=app.state.xai_bridge.send_audio_frame,
-            audio_source=app.state.xai_bridge.receive_audio_frame,
-        )
+    app.state.xai_config = load_xai_config()
+    app.state.xai_bridge = XaiRealtimeBridge(app.state.xai_config)
+    app.state.webrtc_service = AiortcWebRtcService(
+        audio_sink=app.state.xai_bridge.send_audio_frame,
+        audio_source=app.state.xai_bridge.receive_audio_frame,
+    )
     app.state.xai_event_task = None
     app.state.idle_timeout_task = None
 
