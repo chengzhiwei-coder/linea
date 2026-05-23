@@ -42,3 +42,17 @@ async def test_webrtc_offer_returns_stub_answer_for_valid_offer(tmp_path):
     assert body["type"] == "answer"
     assert body["call_id"]
     assert isinstance(body["sdp"], str)
+
+
+async def test_webrtc_offer_rejects_second_active_call(tmp_path):
+    app = create_app(db_path=tmp_path / "linea.db")
+    token = app.state.initial_server_token
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"type": "offer", "sdp": "fake-sdp"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/webrtc/offer", headers=headers, json=payload)
+        second = await client.post("/webrtc/offer", headers=headers, json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
