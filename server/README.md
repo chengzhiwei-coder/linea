@@ -33,6 +33,7 @@ Use `GET /auth/check` to validate a saved token. Missing, malformed, or invalid 
 ## Endpoints
 
 - `GET /health`: unauthenticated liveness check; returns `{"ok": true}`.
+- `GET /internal/conversation-test`: unauthenticated internal HTML page for manual browser verification of the WebRTC conversation path. Open it from the same local server, paste the server bearer token into the page, and click **Start conversation**.
 - `GET /auth/check`: bearer-auth validation; returns `{"ok": true}` when authorized.
 - `POST /webrtc/offer`: bearer-auth WebRTC offer endpoint. The request body is an SDP offer, and the response includes an SDP answer and `call_id`. V1 allows one active call at a time; a second call attempt returns `409 Conflict`.
 

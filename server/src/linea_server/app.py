@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import HTMLResponse
 
 from linea_server.auth import require_bearer_auth
+from linea_server.internal_test_page import CONVERSATION_TEST_HTML
 from linea_server.calls import CallManager, WebRtcOfferRequest, WebRtcOfferResponse
 from linea_server.db import DEFAULT_DB_PATH, initialize_db
 from linea_server.webrtc import AiortcWebRtcService
@@ -69,6 +71,10 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/internal/conversation-test", response_class=HTMLResponse)
+    async def internal_conversation_test() -> HTMLResponse:
+        return HTMLResponse(CONVERSATION_TEST_HTML)
 
     @app.get("/auth/check", dependencies=[Depends(require_bearer_auth)])
     async def auth_check() -> dict[str, bool]:
