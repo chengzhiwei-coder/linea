@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,8 @@ from linea_server.db import DEFAULT_DB_PATH
 from linea_server.tool_logs import finish_tool_call, start_tool_call
 from linea_server.tools import ToolRegistry, register_default_tools
 from linea_server.xai_config import XaiConfig
+
+logger = logging.getLogger(__name__)
 
 
 TIME_TOOL_SCHEMA: dict[str, Any] = {
@@ -100,10 +103,14 @@ class XaiToolCallRequest:
 
 
 async def connect_xai_realtime(config: XaiConfig) -> RealtimeConnection:
-    websocket = await connect(
-        config.realtime_url,
-        additional_headers=XaiRealtimeClient(config).authorization_header(),
-    )
+    try:
+        websocket = await connect(
+            config.realtime_url,
+            additional_headers=XaiRealtimeClient(config).authorization_header(),
+        )
+    except Exception:
+        logger.exception("xAI realtime connect/auth failure url=%s model=%s", config.realtime_url, config.model)
+        raise
     return WebSocketRealtimeConnection(websocket)
 
 
@@ -185,6 +192,7 @@ class XaiRealtimeBridge:
                 if isinstance(encoded_audio, str):
                     await self._audio_output.put(base64.b64decode(encoded_audio))
             elif event_type == "error":
+                logger.error("xAI realtime provider error")
                 await self.close()
                 raise XaiRealtimeError(str(event.get("error") or event))
             elif tool_call := parse_tool_call_event(event):

@@ -1,8 +1,11 @@
+import logging
 from pathlib import Path
 import sqlite3
 
 
 VALID_FINAL_STATUSES = {"success", "error", "cancelled"}
+
+logger = logging.getLogger(__name__)
 
 
 def start_tool_call(db_path: Path, call_id: str, tool_name: str) -> int:
@@ -14,7 +17,14 @@ def start_tool_call(db_path: Path, call_id: str, tool_name: str) -> int:
         conn.commit()
         if cursor.lastrowid is None:
             raise RuntimeError("failed to create tool call log row")
-        return cursor.lastrowid
+        tool_call_id = cursor.lastrowid
+        logger.info(
+            "tool call started call_id=%s tool_call_id=%s tool_name=%s",
+            call_id,
+            tool_call_id,
+            tool_name,
+        )
+        return tool_call_id
 
 
 def finish_tool_call(db_path: Path, tool_call_id: int, status: str) -> None:
@@ -22,6 +32,7 @@ def finish_tool_call(db_path: Path, tool_call_id: int, status: str) -> None:
         raise ValueError(f"invalid final tool status: {status}")
 
     with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT tool_name FROM tool_calls WHERE id = ?", (tool_call_id,)).fetchone()
         cursor = conn.execute(
             """
             UPDATE tool_calls
@@ -31,5 +42,11 @@ def finish_tool_call(db_path: Path, tool_call_id: int, status: str) -> None:
             (status, tool_call_id),
         )
         conn.commit()
-        if cursor.rowcount != 1:
+        if cursor.rowcount != 1 or row is None:
             raise ValueError(f"tool call log row not found or already finished: {tool_call_id}")
+        logger.info(
+            "tool call finished tool_call_id=%s tool_name=%s status=%s",
+            tool_call_id,
+            row[0],
+            status,
+        )
