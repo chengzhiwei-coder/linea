@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from linea_server.auth import require_bearer_auth
 from linea_server.db import DEFAULT_DB_PATH, initialize_db
 
 
@@ -14,6 +15,10 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.get("/auth/check", dependencies=[Depends(require_bearer_auth)])
+    async def auth_check() -> dict[str, bool]:
         return {"ok": True}
 
     return app
