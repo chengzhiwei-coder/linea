@@ -30,6 +30,29 @@ async def test_pcm_output_audio_track_uses_xai_audio_source():
     assert audio_frame_to_pcm16(frame).startswith(b"\x01\x00\x02\x00")
 
 
+async def test_pcm_output_audio_track_splits_provider_chunks_into_twenty_ms_frames():
+    chunk = b"\x01\x00" * (960 * 2)
+    calls = 0
+
+    async def audio_source() -> bytes | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return chunk
+        return None
+
+    track = PcmOutputAudioTrack(audio_source)
+
+    first_frame = await track.recv()
+    second_frame = await track.recv()
+
+    assert first_frame.samples == 960
+    assert second_frame.samples == 960
+    assert audio_frame_to_pcm16(first_frame) == b"\x01\x00" * 960
+    assert audio_frame_to_pcm16(second_frame) == b"\x01\x00" * 960
+    assert calls == 1
+
+
 def test_audio_frame_to_pcm16_packs_frame_for_xai_input():
     frame = make_pcm16_audio_frame(b"\x03\x00\x04\x00")
 
