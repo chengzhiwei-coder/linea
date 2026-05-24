@@ -15,6 +15,48 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     code { padding: 0.1rem 0.25rem; }
     pre { min-height: 12rem; padding: 1rem; overflow: auto; white-space: pre-wrap; }
     .status { font-weight: 700; }
+    .voice-activity {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    .wave-panel {
+      border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas);
+      border-radius: 0.9rem;
+      padding: 1rem;
+      background: color-mix(in srgb, CanvasText 4%, Canvas);
+    }
+    .wave-label { display: flex; justify-content: space-between; gap: 1rem; font-weight: 700; }
+    .wave-status { color: color-mix(in srgb, CanvasText 65%, Canvas); font-weight: 600; }
+    .wave-bars { display: flex; align-items: center; gap: 0.35rem; height: 4rem; margin-top: 0.75rem; }
+    .wave-bars span {
+      flex: 1;
+      min-width: 0.35rem;
+      height: 1rem;
+      border-radius: 999px;
+      background: color-mix(in srgb, #4f46e5 58%, Canvas);
+      opacity: 0.35;
+      transform-origin: center;
+      animation: wavePulse 1.2s ease-in-out infinite paused;
+    }
+    .agent-wave .wave-bars span { background: color-mix(in srgb, #0d9488 60%, Canvas); }
+    .wave-bars span:nth-child(2) { animation-delay: -1s; }
+    .wave-bars span:nth-child(3) { animation-delay: -0.8s; }
+    .wave-bars span:nth-child(4) { animation-delay: -0.6s; }
+    .wave-bars span:nth-child(5) { animation-delay: -0.4s; }
+    .wave-panel.active .wave-bars span { animation-play-state: running; opacity: 0.95; }
+    .wave-panel.listening .wave-bars span { animation-play-state: running; opacity: 0.55; animation-duration: 1.8s; }
+    .conversation-state { font-weight: 800; }
+    @keyframes wavePulse {
+      0%, 100% { transform: scaleY(0.45); }
+      50% { transform: scaleY(2.4); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .wave-bars span { animation: none; }
+      .wave-panel.active .wave-bars span,
+      .wave-panel.listening .wave-bars span { transform: scaleY(1.4); }
+    }
     .ok { color: #16833a; }
     .warn { color: #b26b00; }
     .error { color: #c01c28; }
@@ -38,6 +80,17 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     </div>
 
     <p>Status: <span id="status" class="status warn">idle</span></p>
+    <section id="voiceActivity" class="voice-activity" aria-label="Voice activity">
+      <div id="userWave" class="wave-panel user-wave" aria-live="polite">
+        <div class="wave-label"><span>User</span><span id="userWaveStatus" class="wave-status">silent</span></div>
+        <div class="wave-bars" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+      </div>
+      <div id="agentWave" class="wave-panel agent-wave listening" aria-live="polite">
+        <div class="wave-label"><span>Agent</span><span id="agentWaveStatus" class="wave-status">idle</span></div>
+        <div class="wave-bars" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+      </div>
+    </section>
+    <p>Conversation: <span id="conversationState" class="conversation-state warn">Agent listening</span></p>
     <audio id="remoteAudio" autoplay controls></audio>
 
     <h2>Log</h2>
@@ -50,6 +103,11 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     const stopButton = document.getElementById('stopButton');
     const remoteAudio = document.getElementById('remoteAudio');
     const statusEl = document.getElementById('status');
+    const conversationStateEl = document.getElementById('conversationState');
+    const userWave = document.getElementById('userWave');
+    const agentWave = document.getElementById('agentWave');
+    const userWaveStatus = document.getElementById('userWaveStatus');
+    const agentWaveStatus = document.getElementById('agentWaveStatus');
     const logEl = document.getElementById('log');
 
     const INITIAL_GREETING_MIC_MUTE_MS = 2500;
@@ -58,6 +116,11 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     let localStream = null;
     let currentCallId = null;
     let microphoneEnableTimer = null;
+    let audioContext = null;
+    let localAnalyser = null;
+    let remoteAnalyser = null;
+    let voiceActivityFrame = null;
+    let agentHasRemoteAudio = false;
 
     function log(message) {
       const timestamp = new Date().toLocaleTimeString();
@@ -68,6 +131,99 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     function setStatus(message, className = 'warn') {
       statusEl.textContent = message;
       statusEl.className = `status ${className}`;
+    }
+
+    function updateConversationState(message, className = 'warn') {
+      conversationStateEl.textContent = message;
+      conversationStateEl.className = `conversation-state ${className}`;
+    }
+
+    async function ensureAudioContext() {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        throw new Error('Web Audio API is not available in this browser.');
+      }
+      if (!audioContext || audioContext.state === 'closed') {
+        audioContext = new AudioContextClass();
+      }
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+      return audioContext;
+    }
+
+    async function createAnalyserForStream(stream) {
+      const context = await ensureAudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.82;
+      context.createMediaStreamSource(stream).connect(analyser);
+      return analyser;
+    }
+
+    function isSpeaking(analyser) {
+      if (!analyser) return false;
+      const samples = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(samples);
+      let sumSquares = 0;
+      for (const sample of samples) {
+        const normalized = (sample - 128) / 128;
+        sumSquares += normalized * normalized;
+      }
+      const rms = Math.sqrt(sumSquares / samples.length);
+      return rms > 0.035;
+    }
+
+    function setWave(panel, status, active, listening = false) {
+      panel.classList.toggle('active', active);
+      panel.classList.toggle('listening', listening && !active);
+      status.textContent = active ? 'speaking' : listening ? 'listening' : 'silent';
+    }
+
+    function sampleVoiceActivity() {
+      const userSpeaking = localStream && isSpeaking(localAnalyser);
+      const agentSpeaking = isSpeaking(remoteAnalyser);
+      const microphoneLive = Boolean(localStream?.getAudioTracks().some((track) => track.enabled));
+
+      setWave(userWave, userWaveStatus, Boolean(userSpeaking));
+      setWave(agentWave, agentWaveStatus, agentSpeaking, microphoneLive && !agentSpeaking);
+
+      if (agentSpeaking) {
+        updateConversationState('Agent speaking', 'ok');
+      } else if (userSpeaking) {
+        updateConversationState('User speaking', 'ok');
+      } else if (microphoneLive && agentHasRemoteAudio) {
+        updateConversationState('Agent listening', 'ok');
+      } else if (agentHasRemoteAudio) {
+        updateConversationState('Agent speaking or greeting', 'warn');
+      } else {
+        updateConversationState('Agent listening', 'warn');
+      }
+
+      voiceActivityFrame = requestAnimationFrame(sampleVoiceActivity);
+    }
+
+    function startVoiceActivityMonitoring() {
+      if (voiceActivityFrame === null) {
+        voiceActivityFrame = requestAnimationFrame(sampleVoiceActivity);
+      }
+    }
+
+    async function stopVoiceActivityMonitoring() {
+      if (voiceActivityFrame !== null) {
+        window.cancelAnimationFrame(voiceActivityFrame);
+        voiceActivityFrame = null;
+      }
+      localAnalyser = null;
+      remoteAnalyser = null;
+      agentHasRemoteAudio = false;
+      setWave(userWave, userWaveStatus, false);
+      setWave(agentWave, agentWaveStatus, false, true);
+      updateConversationState('Agent listening', 'warn');
+      if (audioContext && audioContext.state !== 'closed') {
+        await audioContext.close();
+      }
+      audioContext = null;
     }
 
     function setMicrophoneEnabled(enabled) {
@@ -129,6 +285,8 @@ CONVERSATION_TEST_HTML = """<!doctype html>
             autoGainControl: true,
           },
         });
+        localAnalyser = await createAnalyserForStream(localStream);
+        startVoiceActivityMonitoring();
         setMicrophoneEnabled(false);
         log('Microphone stream acquired.');
 
@@ -142,7 +300,18 @@ CONVERSATION_TEST_HTML = """<!doctype html>
         };
         peerConnection.ontrack = (event) => {
           log(`Remote ${event.track.kind} track received.`);
-          remoteAudio.srcObject = event.streams[0];
+          const [remoteStream] = event.streams;
+          remoteAudio.srcObject = remoteStream;
+          agentHasRemoteAudio = true;
+          void createAnalyserForStream(remoteStream)
+            .then((analyser) => {
+              if (remoteAudio.srcObject !== remoteStream || !peerConnection) return;
+              remoteAnalyser = analyser;
+              startVoiceActivityMonitoring();
+            })
+            .catch((error) => {
+              log(`Voice activity monitor unavailable: ${error instanceof Error ? error.message : String(error)}`);
+            });
           scheduleMicrophoneEnableAfterGreeting();
         };
 
@@ -207,6 +376,7 @@ CONVERSATION_TEST_HTML = """<!doctype html>
       clearMicrophoneEnableTimer();
       await releaseServerCall();
       setMicrophoneEnabled(false);
+      await stopVoiceActivityMonitoring();
       if (peerConnection) {
         peerConnection.close();
         peerConnection = null;
