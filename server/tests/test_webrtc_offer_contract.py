@@ -66,8 +66,9 @@ async def test_webrtc_offer_returns_real_answer_for_valid_offer(tmp_path):
     assert "stub-answer-sdp" not in body["sdp"]
     assert app.state.xai_bridge._initial_greeting_text == "Hey, how can I help you?"
     assert app.state.xai_bridge._on_input_speech_started is not None
-    assert app.state.xai_bridge._is_tool_call_active(body["call_id"]) is True
-    assert app.state.xai_bridge._is_tool_call_active("stale-call") is False
+    assert app.state.xai_bridge._is_tool_call_active("provider-tool-call-id") is True
+    app.state.call_manager.release_call(body["call_id"])
+    assert app.state.xai_bridge._is_tool_call_active("provider-tool-call-id") is False
     await close_webrtc_service(app)
 
 
