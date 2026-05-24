@@ -1,3 +1,4 @@
+import asyncio
 import base64
 
 import pytest
@@ -95,6 +96,34 @@ async def test_bridge_receives_xai_audio_delta_for_webrtc_output():
     await bridge.process_events()
 
     assert await bridge.receive_audio_frame() == pcm
+
+
+async def test_bridge_receive_audio_frame_waits_briefly_for_late_audio_delta():
+    pcm = b"\x07\x08"
+
+    class DelayedAudioConnection(FakeRealtimeConnection):
+        async def __anext__(self):
+            await asyncio.sleep(0.001)
+            return await super().__anext__()
+
+    connection = DelayedAudioConnection(
+        [
+            {
+                "type": "response.output_audio.delta",
+                "delta": base64.b64encode(pcm).decode("ascii"),
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret", realtime_url="wss://api.x.ai/v1/realtime"),
+        connection=connection,
+    )
+
+    event_task = asyncio.create_task(bridge.process_events())
+    try:
+        assert await bridge.receive_audio_frame() == pcm
+    finally:
+        await event_task
 
 
 async def test_bridge_accepts_legacy_audio_delta_event_name():

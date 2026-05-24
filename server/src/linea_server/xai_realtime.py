@@ -17,6 +17,7 @@ from linea_server.xai_config import XaiConfig
 logger = logging.getLogger(__name__)
 
 XAI_AUDIO_SAMPLE_RATE = 48_000
+XAI_AUDIO_OUTPUT_GRACE_SECONDS = 0.005
 
 
 TIME_TOOL_SCHEMA: dict[str, Any] = {
@@ -262,9 +263,17 @@ class XaiRealtimeBridge:
         self._record_call_activity()
 
     async def receive_audio_frame(self) -> bytes | None:
-        if self._audio_output.empty():
+        try:
+            return self._audio_output.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+
+        try:
+            return await asyncio.wait_for(
+                self._audio_output.get(), timeout=XAI_AUDIO_OUTPUT_GRACE_SECONDS
+            )
+        except TimeoutError:
             return None
-        return self._audio_output.get_nowait()
 
     async def close(self) -> None:
         self._closed = True
