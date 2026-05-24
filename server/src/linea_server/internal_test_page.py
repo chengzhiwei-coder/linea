@@ -52,8 +52,11 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     const statusEl = document.getElementById('status');
     const logEl = document.getElementById('log');
 
+    const INITIAL_GREETING_MIC_MUTE_MS = 2500;
+
     let peerConnection = null;
     let localStream = null;
+    let microphoneEnableTimer = null;
 
     function log(message) {
       const timestamp = new Date().toLocaleTimeString();
@@ -64,6 +67,31 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     function setStatus(message, className = 'warn') {
       statusEl.textContent = message;
       statusEl.className = `status ${className}`;
+    }
+
+    function setMicrophoneEnabled(enabled) {
+      if (!localStream) return;
+      for (const track of localStream.getAudioTracks()) {
+        track.enabled = enabled;
+      }
+      log(`Microphone ${enabled ? 'enabled' : 'muted'}.`);
+    }
+
+    function clearMicrophoneEnableTimer() {
+      if (microphoneEnableTimer !== null) {
+        window.clearTimeout(microphoneEnableTimer);
+        microphoneEnableTimer = null;
+      }
+    }
+
+    function scheduleMicrophoneEnableAfterGreeting() {
+      clearMicrophoneEnableTimer();
+      log(`Keeping microphone muted for ${INITIAL_GREETING_MIC_MUTE_MS}ms to avoid greeting echo.`);
+      microphoneEnableTimer = window.setTimeout(() => {
+        microphoneEnableTimer = null;
+        setMicrophoneEnabled(true);
+        setStatus('connected; speak into the microphone', 'ok');
+      }, INITIAL_GREETING_MIC_MUTE_MS);
     }
 
     async function waitForIceGatheringComplete(pc) {
@@ -93,7 +121,14 @@ CONVERSATION_TEST_HTML = """<!doctype html>
       setStatus('starting...', 'warn');
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        setMicrophoneEnabled(false);
         log('Microphone stream acquired.');
 
         peerConnection = new RTCPeerConnection();
@@ -107,6 +142,7 @@ CONVERSATION_TEST_HTML = """<!doctype html>
         peerConnection.ontrack = (event) => {
           log(`Remote ${event.track.kind} track received.`);
           remoteAudio.srcObject = event.streams[0];
+          scheduleMicrophoneEnableAfterGreeting();
         };
 
         for (const track of localStream.getAudioTracks()) {
@@ -135,7 +171,7 @@ CONVERSATION_TEST_HTML = """<!doctype html>
         const answer = await response.json();
         log(`Answer received. call_id=${answer.call_id}`);
         await peerConnection.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
-        setStatus('negotiated; speak into the microphone', 'ok');
+        setStatus('negotiated; waiting for greeting playback', 'ok');
       } catch (error) {
         setStatus('failed', 'error');
         log(error instanceof Error ? error.message : String(error));
@@ -144,6 +180,8 @@ CONVERSATION_TEST_HTML = """<!doctype html>
     }
 
     function stopConversation() {
+      clearMicrophoneEnableTimer();
+      setMicrophoneEnabled(false);
       if (peerConnection) {
         peerConnection.close();
         peerConnection = null;
