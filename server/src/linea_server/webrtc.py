@@ -120,7 +120,7 @@ class PcmOutputAudioTrack(MediaStreamTrack):
         await self._wait_for_next_frame_deadline()
 
         received_audio = False
-        while True:
+        while len(self._pcm_buffer) < self._prebuffer_target_bytes:
             pcm16 = await self._audio_source()
             if not pcm16:
                 break
