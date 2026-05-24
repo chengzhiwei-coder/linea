@@ -65,6 +65,7 @@ async def test_webrtc_offer_returns_real_answer_for_valid_offer(tmp_path):
     assert "m=audio" in body["sdp"]
     assert "stub-answer-sdp" not in body["sdp"]
     assert app.state.xai_bridge._initial_greeting_text == "Hey, how can I help you?"
+    assert app.state.xai_bridge._on_input_speech_started is not None
     await close_webrtc_service(app)
 
 

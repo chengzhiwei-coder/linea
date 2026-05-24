@@ -135,16 +135,24 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
             _ = pcm16
 
         if app.state.xai_config is not None:
+            webrtc_service: AiortcWebRtcService | None = None
+
+            def interrupt_output_audio() -> None:
+                if webrtc_service is not None:
+                    webrtc_service.interrupt_output_audio()
+
             app.state.xai_bridge = XaiRealtimeBridge(
                 app.state.xai_config,
                 record_activity=activity_callback,
                 initial_greeting_text=INITIAL_GREETING_TEXT,
+                on_input_speech_started=interrupt_output_audio,
             )
-            app.state.webrtc_service = AiortcWebRtcService(
+            webrtc_service = AiortcWebRtcService(
                 audio_sink=app.state.xai_bridge.send_audio_frame,
                 audio_source=app.state.xai_bridge.receive_audio_frame,
                 record_activity=activity_callback,
             )
+            app.state.webrtc_service = webrtc_service
         else:
             app.state.webrtc_service = AiortcWebRtcService(
                 audio_sink=discard_audio_frame,

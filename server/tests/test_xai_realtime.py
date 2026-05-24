@@ -143,6 +143,34 @@ async def test_bridge_receive_audio_frame_returns_none_when_queue_empty():
     assert await bridge.receive_audio_frame() is None
 
 
+async def test_bridge_clears_queued_output_audio_when_user_starts_speaking():
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.output_audio.delta",
+                "delta": base64.b64encode(b"assistant audio").decode("ascii"),
+            },
+            {"type": "input_audio_buffer.speech_started"},
+        ]
+    )
+    interruptions = 0
+
+    def on_input_speech_started() -> None:
+        nonlocal interruptions
+        interruptions += 1
+
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret", realtime_url="wss://api.x.ai/v1/realtime"),
+        connection=connection,
+        on_input_speech_started=on_input_speech_started,
+    )
+
+    await bridge.process_events()
+
+    assert await bridge.receive_audio_frame() is None
+    assert interruptions == 1
+
+
 async def test_bridge_accepts_legacy_audio_delta_event_name():
     pcm = b"\x05\x06"
     connection = FakeRealtimeConnection(

@@ -174,6 +174,26 @@ async def test_pcm_output_audio_track_re_enters_prebuffer_on_underflow():
     assert resumed == full_frame
 
 
+async def test_pcm_output_audio_track_interrupt_discards_buffered_assistant_speech():
+    full_frame = b"\x01\x00" * 960
+    chunks: list[bytes | None] = [full_frame, full_frame]
+
+    async def audio_source() -> bytes | None:
+        if chunks:
+            return chunks.pop(0)
+        return None
+
+    track = PcmOutputAudioTrack(audio_source, prebuffer_frames=2)
+    played = audio_frame_to_pcm16(await track.recv())
+
+    track.interrupt()
+
+    interrupted = audio_frame_to_pcm16(await track.recv())
+
+    assert played == full_frame
+    assert interrupted == bytes(960 * 2)
+
+
 async def test_pcm_output_audio_track_rejects_zero_prebuffer():
     async def audio_source() -> bytes | None:
         return None

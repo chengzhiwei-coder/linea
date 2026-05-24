@@ -123,6 +123,12 @@ class PcmOutputAudioTrack(MediaStreamTrack):
         self._playing = False
         self._next_recv_deadline: float | None = None
 
+    def interrupt(self) -> None:
+        """Immediately stop buffered assistant playback after a user barge-in."""
+
+        self._pcm_buffer.clear()
+        self._playing = False
+
     async def recv(self) -> AudioFrame:
         await self._wait_for_next_frame_deadline()
 
@@ -193,6 +199,7 @@ class AiortcWebRtcService:
         self._record_activity = record_activity
         self._peer_connections: set[RTCPeerConnection] = set()
         self._track_tasks: set[asyncio.Task[None]] = set()
+        self._output_tracks: set[PcmOutputAudioTrack] = set()
 
     async def create_answer(self, offer_sdp: str) -> SdpAnswer:
         peer_connection = RTCPeerConnection()
@@ -200,9 +207,9 @@ class AiortcWebRtcService:
         if self._audio_source is None:
             peer_connection.addTrack(SilentAudioTrack())
         else:
-            peer_connection.addTrack(
-                PcmOutputAudioTrack(self._audio_source, record_activity=self._record_activity)
-            )
+            output_track = PcmOutputAudioTrack(self._audio_source, record_activity=self._record_activity)
+            self._output_tracks.add(output_track)
+            peer_connection.addTrack(output_track)
 
         @peer_connection.on("track")
         def on_track(track: MediaStreamTrack) -> None:
@@ -230,12 +237,17 @@ class AiortcWebRtcService:
             for peer_connection in self._peer_connections
         )
 
+    def interrupt_output_audio(self) -> None:
+        for track in list(self._output_tracks):
+            track.interrupt()
+
     async def close(self) -> None:
         for task in list(self._track_tasks):
             task.cancel()
         if self._track_tasks:
             await asyncio.gather(*self._track_tasks, return_exceptions=True)
         self._track_tasks.clear()
+        self._output_tracks.clear()
 
         peer_connections = list(self._peer_connections)
         self._peer_connections.clear()

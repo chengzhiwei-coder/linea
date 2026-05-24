@@ -117,6 +117,7 @@ class WebSocketRealtimeConnection:
 ActivityRecorder = Callable[[], None]
 ConnectionFactory = Callable[[XaiConfig], Awaitable[RealtimeConnection]]
 ToolCallActivePredicate = Callable[[str], bool]
+InputSpeechStartedCallback = Callable[[], None]
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,7 @@ class XaiRealtimeBridge:
         is_tool_call_active: ToolCallActivePredicate = lambda call_id: False,
         record_activity: ActivityRecorder | None = None,
         initial_greeting_text: str | None = None,
+        on_input_speech_started: InputSpeechStartedCallback | None = None,
     ) -> None:
         self._config = config
         self._connection = connection
@@ -178,6 +180,7 @@ class XaiRealtimeBridge:
         self._is_tool_call_active = is_tool_call_active
         self._record_activity = record_activity
         self._initial_greeting_text = initial_greeting_text
+        self._on_input_speech_started = on_input_speech_started
         self._suppress_input_until_greeting_done = initial_greeting_text is not None
         self._start_lock = asyncio.Lock()
         self._started = False
@@ -225,6 +228,11 @@ class XaiRealtimeBridge:
                     await self._audio_output.put(base64.b64decode(encoded_audio))
             elif event_type in {"response.output_audio.done", "response.audio.done", "response.done"}:
                 self._suppress_input_until_greeting_done = False
+            elif event_type == "input_audio_buffer.speech_started":
+                self._suppress_input_until_greeting_done = False
+                self._clear_audio_output()
+                if self._on_input_speech_started is not None:
+                    self._on_input_speech_started()
             elif event_type == "error":
                 logger.error("xAI realtime provider error")
                 await self.close()
@@ -271,6 +279,13 @@ class XaiRealtimeBridge:
             return self._audio_output.get_nowait()
         except asyncio.QueueEmpty:
             return None
+
+    def _clear_audio_output(self) -> None:
+        while True:
+            try:
+                self._audio_output.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
     async def close(self) -> None:
         self._closed = True
