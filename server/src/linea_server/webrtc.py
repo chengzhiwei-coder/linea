@@ -81,9 +81,17 @@ ActivityRecorder = Callable[[], None]
 
 
 class PcmOutputAudioTrack(MediaStreamTrack):
-    """Server audio track backed by PCM16 bytes from the xAI realtime bridge."""
+    """Server audio track backed by PCM16 bytes from the xAI realtime bridge.
+
+    Uses a small jitter buffer so brief gaps in provider chunk arrival do not
+    insert silence inside an utterance. Playback starts only after the buffer
+    has accumulated ``prebuffer_frames`` frames; on underflow we emit silence
+    and re-enter the prebuffer state until enough audio has queued up again.
+    """
 
     kind = "audio"
+
+    _RESYNC_LAG_FRAMES = 5
 
     def __init__(
         self,
@@ -91,51 +99,74 @@ class PcmOutputAudioTrack(MediaStreamTrack):
         *,
         sample_rate: int = 48_000,
         record_activity: ActivityRecorder | None = None,
+        prebuffer_frames: int = 3,
     ) -> None:
         super().__init__()
+        if prebuffer_frames < 1:
+            raise ValueError("prebuffer_frames must be >= 1")
         self._audio_source = audio_source
         self._sample_rate = sample_rate
         self._record_activity = record_activity
         self._timestamp = 0
         self._samples_per_frame = 960
         self._bytes_per_frame = self._samples_per_frame * 2
+        self._frame_duration_seconds = self._samples_per_frame / self._sample_rate
+        self._prebuffer_target_bytes = prebuffer_frames * self._bytes_per_frame
         self._pcm_buffer = bytearray()
-        self._partial_underflow_frames = 0
-        self._partial_underflow_flush_frames = 2
+        self._playing = False
+        self._next_recv_deadline: float | None = None
 
     async def recv(self) -> AudioFrame:
-        await asyncio.sleep(self._samples_per_frame / self._sample_rate)
+        await self._wait_for_next_frame_deadline()
+
         received_audio = False
-        while len(self._pcm_buffer) < self._bytes_per_frame:
+        while True:
             pcm16 = await self._audio_source()
             if not pcm16:
                 break
             self._pcm_buffer.extend(pcm16)
             received_audio = True
-        if received_audio:
-            self._partial_underflow_frames = 0
-            if self._record_activity is not None:
-                self._record_activity()
+        if received_audio and self._record_activity is not None:
+            self._record_activity()
+
+        if not self._playing:
+            if len(self._pcm_buffer) >= self._prebuffer_target_bytes:
+                self._playing = True
+            else:
+                return self._emit_silence_frame()
 
         if len(self._pcm_buffer) >= self._bytes_per_frame:
             pcm16 = bytes(self._pcm_buffer[: self._bytes_per_frame])
             del self._pcm_buffer[: self._bytes_per_frame]
-            self._partial_underflow_frames = 0
-        elif self._pcm_buffer:
-            self._partial_underflow_frames += 1
-            if self._partial_underflow_frames <= self._partial_underflow_flush_frames:
-                pcm16 = bytes(self._bytes_per_frame)
-            else:
-                pcm16 = bytes(self._pcm_buffer).ljust(self._bytes_per_frame, b"\x00")
-                self._pcm_buffer.clear()
-                self._partial_underflow_frames = 0
         else:
-            pcm16 = bytes(self._bytes_per_frame)
-            self._partial_underflow_frames = 0
+            self._playing = False
+            return self._emit_silence_frame()
 
         frame = make_pcm16_audio_frame(pcm16, sample_rate=self._sample_rate, pts=self._timestamp)
         self._timestamp += frame.samples
         return frame
+
+    def _emit_silence_frame(self) -> AudioFrame:
+        frame = make_pcm16_audio_frame(
+            bytes(self._bytes_per_frame),
+            sample_rate=self._sample_rate,
+            pts=self._timestamp,
+        )
+        self._timestamp += frame.samples
+        return frame
+
+    async def _wait_for_next_frame_deadline(self) -> None:
+        loop = asyncio.get_event_loop()
+        now = loop.time()
+        if self._next_recv_deadline is None:
+            self._next_recv_deadline = now
+        self._next_recv_deadline += self._frame_duration_seconds
+        delay = self._next_recv_deadline - loop.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+            return
+        if delay < -self._frame_duration_seconds * self._RESYNC_LAG_FRAMES:
+            self._next_recv_deadline = loop.time() + self._frame_duration_seconds
 
 
 class AiortcWebRtcService:
