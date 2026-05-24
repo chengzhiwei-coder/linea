@@ -40,6 +40,30 @@ async def end_active_call(app: Any, call_id: str) -> None:
     app.state.call_manager.release_call(call_id)
 
 
+async def end_active_call_and_cancel_idle_monitor(app: Any, call_id: str) -> None:
+    await end_active_call(app, call_id)
+    idle_timeout_task: asyncio.Task | None = app.state.idle_timeout_task
+    if idle_timeout_task is not None and not idle_timeout_task.done():
+        idle_timeout_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await idle_timeout_task
+    app.state.idle_timeout_task = None
+
+
+async def release_interrupted_active_call(app: Any) -> bool:
+    call_id = app.state.call_manager.active_call_id
+    if call_id is None:
+        return False
+
+    has_live_peer_connection = getattr(app.state.webrtc_service, "has_live_peer_connection", None)
+    if has_live_peer_connection is None or has_live_peer_connection():
+        return False
+
+    logger.info("call stale call_id=%s reason=webrtc_not_live", call_id)
+    await end_active_call_and_cancel_idle_monitor(app, call_id)
+    return True
+
+
 async def monitor_idle_call(app: Any, call_id: str, *, poll_interval_seconds: float = 1.0) -> None:
     while app.state.call_manager.active_call_id == call_id:
         if app.state.call_manager.is_idle(call_id):
@@ -85,13 +109,7 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
         if app.state.call_manager.active_call_id != call_id:
             return
 
-        await end_active_call(app, call_id)
-        idle_timeout_task: asyncio.Task | None = app.state.idle_timeout_task
-        if idle_timeout_task is not None and not idle_timeout_task.done():
-            idle_timeout_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await idle_timeout_task
-        app.state.idle_timeout_task = None
+        await end_active_call_and_cancel_idle_monitor(app, call_id)
 
     @app.post(
         "/webrtc/offer",
@@ -102,8 +120,11 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
         try:
             call_id = app.state.call_manager.reserve_call()
         except RuntimeError as exc:
-            logger.warning("call rejected reason=already_active")
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            if await release_interrupted_active_call(app):
+                call_id = app.state.call_manager.reserve_call()
+            else:
+                logger.warning("call rejected reason=already_active")
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
         logger.info("call start call_id=%s", call_id)
 

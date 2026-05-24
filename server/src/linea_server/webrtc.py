@@ -22,11 +22,18 @@ class WebRtcService(Protocol):
         """Create a server SDP answer for a client offer."""
         raise NotImplementedError
 
+    def has_live_peer_connection(self) -> bool:
+        """Return whether this service still has a non-terminal peer connection."""
+        raise NotImplementedError
+
 
 class StubWebRtcService:
     async def create_answer(self, offer_sdp: str) -> SdpAnswer:
         _ = offer_sdp
         return SdpAnswer(type="answer", sdp="stub-answer-sdp")
+
+    def has_live_peer_connection(self) -> bool:
+        return False
 
 
 class SilentAudioTrack(MediaStreamTrack):
@@ -215,6 +222,13 @@ class AiortcWebRtcService:
 
         local_description = peer_connection.localDescription
         return SdpAnswer(type=local_description.type, sdp=local_description.sdp)
+
+    def has_live_peer_connection(self) -> bool:
+        terminal_states = {"closed", "failed", "disconnected"}
+        return any(
+            peer_connection.connectionState not in terminal_states
+            for peer_connection in self._peer_connections
+        )
 
     async def close(self) -> None:
         for task in list(self._track_tasks):

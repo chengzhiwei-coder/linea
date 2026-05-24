@@ -102,6 +102,26 @@ async def test_manual_webrtc_stop_releases_call_before_idle_timeout(tmp_path):
     await close_webrtc_service(app)
 
 
+async def test_webrtc_offer_replaces_interrupted_active_call_before_idle_timeout(tmp_path):
+    app = create_app(db_path=tmp_path / "linea.db")
+    token = app.state.initial_server_token
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"type": "offer", "sdp": await create_audio_offer_sdp()}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/webrtc/offer", headers=headers, json=payload)
+        first_call_id = first.json()["call_id"]
+        for peer_connection in list(app.state.webrtc_service._peer_connections):
+            await peer_connection.close()
+
+        second = await client.post("/webrtc/offer", headers=headers, json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["call_id"] != first_call_id
+    await close_webrtc_service(app)
+
+
 async def test_webrtc_offer_releases_reserved_call_when_answer_creation_fails(tmp_path):
     class FailingWebRtcService:
         async def create_answer(self, offer_sdp: str):
