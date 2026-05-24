@@ -103,12 +103,15 @@ class PcmOutputAudioTrack(MediaStreamTrack):
 
     async def recv(self) -> AudioFrame:
         await asyncio.sleep(self._samples_per_frame / self._sample_rate)
-        if len(self._pcm_buffer) < self._bytes_per_frame:
+        received_audio = False
+        while len(self._pcm_buffer) < self._bytes_per_frame:
             pcm16 = await self._audio_source()
-            if pcm16 is not None:
-                self._pcm_buffer.extend(pcm16)
-                if self._record_activity is not None:
-                    self._record_activity()
+            if not pcm16:
+                break
+            self._pcm_buffer.extend(pcm16)
+            received_audio = True
+        if received_audio and self._record_activity is not None:
+            self._record_activity()
 
         if len(self._pcm_buffer) >= self._bytes_per_frame:
             pcm16 = bytes(self._pcm_buffer[: self._bytes_per_frame])

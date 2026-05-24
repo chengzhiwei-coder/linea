@@ -53,6 +53,28 @@ async def test_pcm_output_audio_track_splits_provider_chunks_into_twenty_ms_fram
     assert calls == 1
 
 
+async def test_pcm_output_audio_track_coalesces_small_provider_chunks_before_padding():
+    chunks = [b"\x01\x00" * 320, b"\x02\x00" * 320, b"\x03\x00" * 320]
+    calls = 0
+
+    async def audio_source() -> bytes | None:
+        nonlocal calls
+        calls += 1
+        if chunks:
+            return chunks.pop(0)
+        return None
+
+    track = PcmOutputAudioTrack(audio_source)
+
+    frame = await track.recv()
+
+    assert frame.samples == 960
+    assert audio_frame_to_pcm16(frame) == (
+        b"\x01\x00" * 320 + b"\x02\x00" * 320 + b"\x03\x00" * 320
+    )
+    assert calls == 3
+
+
 def test_audio_frame_to_pcm16_packs_frame_for_xai_input():
     frame = make_pcm16_audio_frame(b"\x03\x00\x04\x00")
 
