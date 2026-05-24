@@ -56,6 +56,7 @@ CONVERSATION_TEST_HTML = """<!doctype html>
 
     let peerConnection = null;
     let localStream = null;
+    let currentCallId = null;
     let microphoneEnableTimer = null;
 
     function log(message) {
@@ -169,18 +170,42 @@ CONVERSATION_TEST_HTML = """<!doctype html>
         }
 
         const answer = await response.json();
+        currentCallId = answer.call_id;
         log(`Answer received. call_id=${answer.call_id}`);
         await peerConnection.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
         setStatus('negotiated; waiting for greeting playback', 'ok');
       } catch (error) {
         setStatus('failed', 'error');
         log(error instanceof Error ? error.message : String(error));
-        stopConversation();
+        await stopConversation();
       }
     }
 
-    function stopConversation() {
+    async function releaseServerCall() {
+      const token = tokenInput.value.trim();
+      if (!currentCallId || !token) return;
+
+      const callId = currentCallId;
+      currentCallId = null;
+      try {
+        const response = await fetch(`/webrtc/calls/${callId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (response.ok) {
+          log('Server call released.');
+        } else {
+          const body = await response.text();
+          log(`Server call release returned HTTP ${response.status}: ${body}`);
+        }
+      } catch (error) {
+        log(`Server call release failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    async function stopConversation() {
       clearMicrophoneEnableTimer();
+      await releaseServerCall();
       setMicrophoneEnabled(false);
       if (peerConnection) {
         peerConnection.close();
@@ -194,11 +219,11 @@ CONVERSATION_TEST_HTML = """<!doctype html>
       startButton.disabled = false;
       stopButton.disabled = true;
       if (statusEl.textContent !== 'failed') setStatus('stopped', 'warn');
-      log('Conversation stopped locally. The server will release the call after idle timeout.');
+      log('Conversation stopped locally and server call release was requested.');
     }
 
     startButton.addEventListener('click', startConversation);
-    stopButton.addEventListener('click', stopConversation);
+    stopButton.addEventListener('click', () => { void stopConversation(); });
   </script>
 </body>
 </html>

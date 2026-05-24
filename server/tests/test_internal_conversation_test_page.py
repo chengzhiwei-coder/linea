@@ -16,5 +16,7 @@ async def test_internal_conversation_test_page_is_served_for_manual_webrtc_verif
     assert "navigator.mediaDevices.getUserMedia" in html
     assert "RTCPeerConnection" in html
     assert "fetch('/webrtc/offer'" in html
+    assert "fetch(`/webrtc/calls/${callId}`" in html
     assert "Authorization': `Bearer ${token}`" in html
     assert "id=\"remoteAudio\"" in html
+    assert "Server call released." in html

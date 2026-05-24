@@ -76,6 +76,23 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
     async def auth_check() -> dict[str, bool]:
         return {"ok": True}
 
+    @app.delete(
+        "/webrtc/calls/{call_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_bearer_auth)],
+    )
+    async def stop_webrtc_call(call_id: str) -> None:
+        if app.state.call_manager.active_call_id != call_id:
+            return
+
+        await end_active_call(app, call_id)
+        idle_timeout_task: asyncio.Task | None = app.state.idle_timeout_task
+        if idle_timeout_task is not None and not idle_timeout_task.done():
+            idle_timeout_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await idle_timeout_task
+        app.state.idle_timeout_task = None
+
     @app.post(
         "/webrtc/offer",
         response_model=WebRtcOfferResponse,
