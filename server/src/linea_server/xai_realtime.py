@@ -48,6 +48,25 @@ def build_session_update(config: XaiConfig) -> dict[str, Any]:
     }
 
 
+def build_initial_greeting_events(greeting_text: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"The WebRTC call just connected. Say exactly: {greeting_text}",
+                    }
+                ],
+            },
+        },
+        {"type": "response.create"},
+    ]
+
+
 class XaiRealtimeClient:
     """Thin boundary around xAI's realtime WebSocket API."""
 
@@ -143,6 +162,7 @@ class XaiRealtimeBridge:
         tool_registry: ToolRegistry | None = None,
         is_tool_call_active: ToolCallActivePredicate = lambda call_id: False,
         record_activity: ActivityRecorder | None = None,
+        initial_greeting_text: str | None = None,
     ) -> None:
         self._config = config
         self._connection = connection
@@ -153,6 +173,7 @@ class XaiRealtimeBridge:
             register_default_tools(self._tool_registry)
         self._is_tool_call_active = is_tool_call_active
         self._record_activity = record_activity
+        self._initial_greeting_text = initial_greeting_text
         self._start_lock = asyncio.Lock()
         self._started = False
         self._closed = False
@@ -168,6 +189,10 @@ class XaiRealtimeBridge:
                 self._connection = await self._connection_factory(self._config)
             await self._connection.send_json(build_session_update(self._config))
             self._record_call_activity()
+            if self._initial_greeting_text is not None:
+                for event in build_initial_greeting_events(self._initial_greeting_text):
+                    await self._connection.send_json(event)
+                    self._record_call_activity()
             self._started = True
 
     async def send_audio_frame(self, pcm16: bytes) -> None:

@@ -44,6 +44,33 @@ async def test_bridge_sends_session_update_and_pcm_audio_to_xai():
     }
 
 
+async def test_bridge_can_request_initial_greeting_after_session_start():
+    connection = FakeRealtimeConnection([])
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret", realtime_url="wss://api.x.ai/v1/realtime"),
+        connection=connection,
+        initial_greeting_text="Hey, how can I help you?",
+    )
+
+    await bridge.start()
+
+    assert connection.sent[0]["type"] == "session.update"
+    assert connection.sent[1] == {
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "The WebRTC call just connected. Say exactly: Hey, how can I help you?",
+                }
+            ],
+        },
+    }
+    assert connection.sent[2] == {"type": "response.create"}
+
+
 async def test_bridge_receives_xai_audio_delta_for_webrtc_output():
     pcm = b"\x03\x04"
     connection = FakeRealtimeConnection(

@@ -17,6 +17,8 @@ from linea_server.xai_realtime import XaiRealtimeBridge
 
 logger = logging.getLogger(__name__)
 
+INITIAL_GREETING_TEXT = "Hey, how can I help you?"
+
 
 async def end_active_call(app: Any, call_id: str) -> None:
     logger.info("call end call_id=%s", call_id)
@@ -98,6 +100,7 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
             app.state.xai_bridge = XaiRealtimeBridge(
                 app.state.xai_config,
                 record_activity=activity_callback,
+                initial_greeting_text=INITIAL_GREETING_TEXT,
             )
             app.state.webrtc_service = AiortcWebRtcService(
                 audio_sink=app.state.xai_bridge.send_audio_frame,
