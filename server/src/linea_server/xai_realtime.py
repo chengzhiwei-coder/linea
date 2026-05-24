@@ -179,6 +179,7 @@ class XaiRealtimeBridge:
         self._is_tool_call_active = is_tool_call_active
         self._record_activity = record_activity
         self._initial_greeting_text = initial_greeting_text
+        self._suppress_input_until_greeting_done = initial_greeting_text is not None
         self._start_lock = asyncio.Lock()
         self._started = False
         self._closed = False
@@ -202,6 +203,8 @@ class XaiRealtimeBridge:
 
     async def send_audio_frame(self, pcm16: bytes) -> None:
         await self.start()
+        if self._suppress_input_until_greeting_done:
+            return
         assert self._connection is not None
         await self._connection.send_json(
             {
@@ -221,6 +224,8 @@ class XaiRealtimeBridge:
                 encoded_audio = event.get("delta")
                 if isinstance(encoded_audio, str):
                     await self._audio_output.put(base64.b64decode(encoded_audio))
+            elif event_type in {"response.output_audio.done", "response.audio.done", "response.done"}:
+                self._suppress_input_until_greeting_done = False
             elif event_type == "error":
                 logger.error("xAI realtime provider error")
                 await self.close()

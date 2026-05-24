@@ -77,6 +77,40 @@ async def test_bridge_can_request_initial_greeting_after_session_start():
     assert connection.sent[2] == {"type": "response.create"}
 
 
+async def test_initial_greeting_suppresses_microphone_echo_until_response_done():
+    connection = FakeRealtimeConnection([])
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret", realtime_url="wss://api.x.ai/v1/realtime"),
+        connection=connection,
+        initial_greeting_text="Hey, how can I help you?",
+    )
+
+    await bridge.send_audio_frame(b"\x01\x02")
+
+    assert [event["type"] for event in connection.sent] == [
+        "session.update",
+        "conversation.item.create",
+        "response.create",
+    ]
+
+
+async def test_initial_greeting_allows_microphone_after_response_done():
+    connection = FakeRealtimeConnection([{"type": "response.done"}])
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret", realtime_url="wss://api.x.ai/v1/realtime"),
+        connection=connection,
+        initial_greeting_text="Hey, how can I help you?",
+    )
+
+    await bridge.process_events()
+    await bridge.send_audio_frame(b"\x01\x02")
+
+    assert connection.sent[-1] == {
+        "type": "input_audio_buffer.append",
+        "audio": base64.b64encode(b"\x01\x02").decode("ascii"),
+    }
+
+
 async def test_bridge_receives_xai_audio_delta_for_webrtc_output():
     pcm = b"\x03\x04"
     connection = FakeRealtimeConnection(

@@ -100,6 +100,8 @@ class PcmOutputAudioTrack(MediaStreamTrack):
         self._samples_per_frame = 960
         self._bytes_per_frame = self._samples_per_frame * 2
         self._pcm_buffer = bytearray()
+        self._partial_underflow_frames = 0
+        self._partial_underflow_flush_frames = 2
 
     async def recv(self) -> AudioFrame:
         await asyncio.sleep(self._samples_per_frame / self._sample_rate)
@@ -110,15 +112,26 @@ class PcmOutputAudioTrack(MediaStreamTrack):
                 break
             self._pcm_buffer.extend(pcm16)
             received_audio = True
-        if received_audio and self._record_activity is not None:
-            self._record_activity()
+        if received_audio:
+            self._partial_underflow_frames = 0
+            if self._record_activity is not None:
+                self._record_activity()
 
         if len(self._pcm_buffer) >= self._bytes_per_frame:
             pcm16 = bytes(self._pcm_buffer[: self._bytes_per_frame])
             del self._pcm_buffer[: self._bytes_per_frame]
+            self._partial_underflow_frames = 0
+        elif self._pcm_buffer:
+            self._partial_underflow_frames += 1
+            if self._partial_underflow_frames <= self._partial_underflow_flush_frames:
+                pcm16 = bytes(self._bytes_per_frame)
+            else:
+                pcm16 = bytes(self._pcm_buffer).ljust(self._bytes_per_frame, b"\x00")
+                self._pcm_buffer.clear()
+                self._partial_underflow_frames = 0
         else:
-            pcm16 = bytes(self._pcm_buffer).ljust(self._bytes_per_frame, b"\x00")
-            self._pcm_buffer.clear()
+            pcm16 = bytes(self._bytes_per_frame)
+            self._partial_underflow_frames = 0
 
         frame = make_pcm16_audio_frame(pcm16, sample_rate=self._sample_rate, pts=self._timestamp)
         self._timestamp += frame.samples

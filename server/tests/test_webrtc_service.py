@@ -75,6 +75,42 @@ async def test_pcm_output_audio_track_coalesces_small_provider_chunks_before_pad
     assert calls == 3
 
 
+async def test_pcm_output_audio_track_buffers_short_provider_chunk_across_underflow():
+    chunks = [b"\x01\x00" * 480, None, b"\x02\x00" * 480]
+
+    async def audio_source() -> bytes | None:
+        if chunks:
+            return chunks.pop(0)
+        return None
+
+    track = PcmOutputAudioTrack(audio_source)
+
+    first_frame = await track.recv()
+    second_frame = await track.recv()
+
+    assert audio_frame_to_pcm16(first_frame) == bytes(960 * 2)
+    assert audio_frame_to_pcm16(second_frame) == b"\x01\x00" * 480 + b"\x02\x00" * 480
+
+
+async def test_pcm_output_audio_track_flushes_tail_after_repeated_underflow():
+    chunks = [b"\x01\x00" * 480, None, None]
+
+    async def audio_source() -> bytes | None:
+        if chunks:
+            return chunks.pop(0)
+        return None
+
+    track = PcmOutputAudioTrack(audio_source)
+
+    first_frame = await track.recv()
+    second_frame = await track.recv()
+    third_frame = await track.recv()
+
+    assert audio_frame_to_pcm16(first_frame) == bytes(960 * 2)
+    assert audio_frame_to_pcm16(second_frame) == bytes(960 * 2)
+    assert audio_frame_to_pcm16(third_frame) == (b"\x01\x00" * 480).ljust(960 * 2, b"\x00")
+
+
 def test_audio_frame_to_pcm16_packs_frame_for_xai_input():
     frame = make_pcm16_audio_frame(b"\x03\x00\x04\x00")
 
