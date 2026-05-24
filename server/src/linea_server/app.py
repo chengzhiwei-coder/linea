@@ -144,6 +144,8 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
             app.state.xai_bridge = XaiRealtimeBridge(
                 app.state.xai_config,
                 record_activity=activity_callback,
+                is_tool_call_active=lambda tool_call_id, call_id=call_id: tool_call_id == call_id
+                and app.state.call_manager.active_call_id == call_id,
                 initial_greeting_text=INITIAL_GREETING_TEXT,
                 on_input_speech_started=interrupt_output_audio,
             )
