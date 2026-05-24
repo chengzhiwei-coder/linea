@@ -16,6 +16,8 @@ from linea_server.xai_config import XaiConfig
 
 logger = logging.getLogger(__name__)
 
+XAI_AUDIO_SAMPLE_RATE = 48_000
+
 
 TIME_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
@@ -41,8 +43,10 @@ def build_session_update(config: XaiConfig) -> dict[str, Any]:
             "voice": config.voice,
             "instructions": "You are Linea, Anton's concise realtime voice assistant.",
             "turn_detection": {"type": "server_vad"},
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
+            "audio": {
+                "input": {"format": {"type": "audio/pcm", "rate": XAI_AUDIO_SAMPLE_RATE}},
+                "output": {"format": {"type": "audio/pcm", "rate": XAI_AUDIO_SAMPLE_RATE}},
+            },
             "tools": [TIME_TOOL_SCHEMA],
         },
     }

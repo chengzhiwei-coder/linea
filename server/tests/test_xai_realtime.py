@@ -3,7 +3,12 @@ import base64
 import pytest
 
 from linea_server.xai_config import XaiConfig
-from linea_server.xai_realtime import XaiRealtimeBridge, XaiRealtimeError, build_session_update
+from linea_server.xai_realtime import (
+    XAI_AUDIO_SAMPLE_RATE,
+    XaiRealtimeBridge,
+    XaiRealtimeError,
+    build_session_update,
+)
 
 
 class FakeRealtimeConnection:
@@ -115,8 +120,12 @@ async def test_bridge_accepts_legacy_audio_delta_event_name():
 def test_session_update_declares_pcm16_audio_formats():
     payload = build_session_update(XaiConfig(api_key="secret"))
 
-    assert payload["session"]["input_audio_format"] == "pcm16"
-    assert payload["session"]["output_audio_format"] == "pcm16"
+    assert payload["session"]["audio"] == {
+        "input": {"format": {"type": "audio/pcm", "rate": XAI_AUDIO_SAMPLE_RATE}},
+        "output": {"format": {"type": "audio/pcm", "rate": XAI_AUDIO_SAMPLE_RATE}},
+    }
+    assert "input_audio_format" not in payload["session"]
+    assert "output_audio_format" not in payload["session"]
 
 
 async def test_bridge_closes_connection_on_provider_error():
