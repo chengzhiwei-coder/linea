@@ -1,4 +1,5 @@
 from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.mediastreams import MediaStreamError
 
 from linea_server.webrtc import (
     AiortcWebRtcService,
@@ -32,7 +33,22 @@ async def test_pcm_output_audio_track_uses_xai_audio_source():
 def test_audio_frame_to_pcm16_packs_frame_for_xai_input():
     frame = make_pcm16_audio_frame(b"\x03\x00\x04\x00")
 
-    assert audio_frame_to_pcm16(frame).startswith(b"\x03\x00\x04\x00")
+    assert audio_frame_to_pcm16(frame) == b"\x03\x00\x04\x00"
+
+
+def test_audio_frame_to_pcm16_downmixes_web_rtc_stereo_to_mono_without_padding():
+    from av import AudioFrame
+
+    frame = AudioFrame(format="s16", layout="stereo", samples=2)
+    frame.sample_rate = 48_000
+    frame.planes[0].update(
+        b"\x02\x00"  # left sample 1: 2
+        b"\x04\x00"  # right sample 1: 4 -> mono 3
+        b"\x06\x00"  # left sample 2: 6
+        b"\x08\x00"  # right sample 2: 8 -> mono 7
+    )
+
+    assert audio_frame_to_pcm16(frame) == b"\x03\x00\x07\x00"
 
 
 async def test_aiortc_webrtc_service_returns_answer_for_audio_offer():
@@ -52,3 +68,18 @@ async def test_aiortc_webrtc_service_returns_answer_for_audio_offer():
     finally:
         await service.close()
         await client.close()
+
+
+async def test_audio_track_end_is_handled_as_normal_shutdown():
+    class EndedTrack:
+        kind = "audio"
+
+        async def recv(self):
+            raise MediaStreamError
+
+    async def audio_sink(pcm16: bytes) -> None:
+        raise AssertionError(f"unexpected audio frame: {pcm16!r}")
+
+    service = AiortcWebRtcService(audio_sink=audio_sink)
+
+    await service._consume_audio_track(EndedTrack(), audio_sink)

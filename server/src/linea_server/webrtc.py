@@ -6,7 +6,9 @@ from fractions import Fraction
 from typing import Protocol
 
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc.mediastreams import MediaStreamError
 from av import AudioFrame
+from av.audio.resampler import AudioResampler
 
 
 @dataclass(frozen=True)
@@ -50,9 +52,17 @@ class SilentAudioTrack(MediaStreamTrack):
 
 
 def audio_frame_to_pcm16(frame: AudioFrame) -> bytes:
-    """Return the frame's packed PCM bytes for the xAI realtime bridge."""
+    """Return mono PCM16 bytes without codec/resampler buffer padding."""
 
-    return b"".join(bytes(plane) for plane in frame.planes)
+    if frame.format.name != "s16" or frame.layout.name != "mono":
+        resampler = AudioResampler(format="s16", layout="mono", rate=frame.sample_rate)
+        frames = resampler.resample(frame)
+        if not frames:
+            return b""
+        frame = frames[0]
+
+    expected_bytes = frame.samples * 2
+    return bytes(frame.planes[0])[:expected_bytes]
 
 
 def make_pcm16_audio_frame(pcm16: bytes, *, sample_rate: int = 48_000, pts: int = 0) -> AudioFrame:
@@ -172,7 +182,10 @@ class AiortcWebRtcService:
         frames_consumed = 0
         activity_recorder = record_activity or self._record_activity
         while max_frames is None or frames_consumed < max_frames:
-            frame = await track.recv()
+            try:
+                frame = await track.recv()
+            except MediaStreamError:
+                return
             await audio_sink(audio_frame_to_pcm16(frame))
             if activity_recorder is not None:
                 activity_recorder()

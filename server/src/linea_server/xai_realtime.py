@@ -130,7 +130,7 @@ class XaiRealtimeBridge:
 
     The WebRTC layer owns capture/playback. This class owns the xAI session lifecycle and the
     provider event names: PCM16 bytes are sent as input_audio_buffer.append events, and xAI
-    response.audio.delta events are decoded into PCM16 bytes for the WebRTC output side.
+    response.output_audio.delta events are decoded into PCM16 bytes for the WebRTC output side.
     """
 
     def __init__(
@@ -187,7 +187,7 @@ class XaiRealtimeBridge:
         async for event in self._connection:
             self._record_call_activity()
             event_type = event.get("type")
-            if event_type == "response.audio.delta":
+            if event_type in {"response.output_audio.delta", "response.audio.delta"}:
                 encoded_audio = event.get("delta")
                 if isinstance(encoded_audio, str):
                     await self._audio_output.put(base64.b64decode(encoded_audio))

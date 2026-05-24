@@ -49,7 +49,7 @@ async def test_bridge_receives_xai_audio_delta_for_webrtc_output():
     connection = FakeRealtimeConnection(
         [
             {
-                "type": "response.audio.delta",
+                "type": "response.output_audio.delta",
                 "delta": base64.b64encode(pcm).decode("ascii"),
             }
         ]
@@ -60,6 +60,26 @@ async def test_bridge_receives_xai_audio_delta_for_webrtc_output():
     )
 
     await bridge.start()
+    await bridge.process_events()
+
+    assert await bridge.receive_audio_frame() == pcm
+
+
+async def test_bridge_accepts_legacy_audio_delta_event_name():
+    pcm = b"\x05\x06"
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.audio.delta",
+                "delta": base64.b64encode(pcm).decode("ascii"),
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret", realtime_url="wss://api.x.ai/v1/realtime"),
+        connection=connection,
+    )
+
     await bridge.process_events()
 
     assert await bridge.receive_audio_frame() == pcm
