@@ -6,7 +6,13 @@ from typing import Any
 import pytest
 
 from linea_server.db import initialize_db
-from linea_server.hermes_jobs import create_hermes_job, get_active_hermes_job, get_latest_hermes_job
+from linea_server.hermes_jobs import (
+    complete_hermes_job,
+    create_hermes_job,
+    get_active_hermes_job,
+    get_latest_hermes_job,
+    set_hermes_job_progress,
+)
 from linea_server.hermes_runner import (
     HermesJobManager,
     build_hermes_argv,
@@ -256,3 +262,98 @@ async def test_manager_startup_marks_stale_running_jobs_orphaned(initialized_db,
     assert job is not None
     assert job.id == stale.id
     assert job.status == "failed_orphaned"
+
+
+async def test_running_status_without_structured_progress_uses_honest_safe_fallback(initialized_db, tmp_path):
+    process = FakeProcess()
+    factory = FakeSubprocessFactory(process)
+    manager = make_manager(initialized_db, tmp_path, factory)
+
+    ack = await manager.start_task("do work")
+    status = await manager.get_status()
+
+    assert status == {
+        "ok": True,
+        "status": "running",
+        "job_id": ack["job_id"],
+        "progress_summary": None,
+        "message": "Hermes is still running; no detailed progress signal is available yet.",
+    }
+
+    process.finish()
+    await asyncio.sleep(0)
+
+
+async def test_running_status_does_not_return_secret_stack_trace_or_blob_progress(initialized_db, tmp_path):
+    process = FakeProcess()
+    factory = FakeSubprocessFactory(process)
+    manager = make_manager(initialized_db, tmp_path, factory)
+    ack = await manager.start_task("do work")
+    unsafe_progress = (
+        "Bearer abc.def.ghi\n"
+        "sk-1234567890abcdef\n"
+        "Traceback (most recent call last):\n"
+        + "x" * 10_000
+    )
+    set_hermes_job_progress(initialized_db, ack["job_id"], unsafe_progress)
+
+    status = await manager.get_status()
+
+    assert status["progress_summary"] is None
+    assert status["message"] == "Hermes is still running; no detailed progress signal is available yet."
+    assert "Bearer" not in status["message"]
+    assert "sk-" not in status["message"]
+    assert "Traceback" not in status["message"]
+    assert len(status["message"]) < 100
+
+    process.finish()
+    await asyncio.sleep(0)
+
+
+async def test_running_status_redacts_short_secret_progress_before_returning_it(initialized_db, tmp_path):
+    process = FakeProcess()
+    factory = FakeSubprocessFactory(process)
+    manager = make_manager(initialized_db, tmp_path, factory)
+    ack = await manager.start_task("do work")
+    set_hermes_job_progress(
+        initialized_db,
+        ack["job_id"],
+        "Uploading result with Bearer abc.def.ghi and sk-1234567890abcdef.",
+    )
+
+    status = await manager.get_status()
+
+    assert status["progress_summary"] == "Uploading result with [redacted] and [redacted]."
+    assert status["message"] == "Uploading result with [redacted] and [redacted]."
+    assert "Bearer" not in status["message"]
+    assert "sk-" not in status["message"]
+
+    process.finish()
+    await asyncio.sleep(0)
+
+
+def test_completed_status_does_not_return_arbitrary_final_stdout(initialized_db, tmp_path):
+    job = create_hermes_job(
+        initialized_db,
+        task="done",
+        prompt="done prompt",
+        profile="programmer",
+        profile_home=tmp_path / "profile-home",
+        stdout_path=tmp_path / "stdout.log",
+        stderr_path=tmp_path / "stderr.log",
+    )
+    complete_hermes_job(
+        initialized_db,
+        job.id,
+        final_result="raw stdout with sk-secret and Bearer token\nTraceback\n" + "x" * 10_000,
+    )
+    manager = make_manager(initialized_db, tmp_path, FakeSubprocessFactory(FakeProcess()))
+
+    status = asyncio.run(manager.get_status())
+
+    assert status == {
+        "ok": True,
+        "status": "completed",
+        "job_id": job.id,
+        "message": "The latest Hermes job completed; the final result will be sent to Telegram.",
+    }

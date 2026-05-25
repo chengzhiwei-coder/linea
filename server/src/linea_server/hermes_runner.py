@@ -1,4 +1,5 @@
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,15 @@ from linea_server.hermes_jobs import (
 DEFAULT_PROFILE = "default"
 DEFAULT_HERMES_LOG_ROOT = Path(".data/hermes_jobs")
 _MAX_FINAL_RESULT_BYTES = 64 * 1024
+_RUNNING_PROGRESS_FALLBACK = "Hermes is still running; no detailed progress signal is available yet."
+_COMPLETED_STATUS_MESSAGE = "The latest Hermes job completed; the final result will be sent to Telegram."
+_FAILED_STATUS_MESSAGE = "The latest Hermes job failed; check local diagnostics if needed."
+_CANCELLED_STATUS_MESSAGE = "The latest Hermes job was cancelled."
+_SECRET_PATTERNS = (
+    re.compile(r"Bearer\s+\S+", re.IGNORECASE),
+    re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
+)
+_UNSAFE_PROGRESS_MARKERS = ("Traceback (most recent call last):",)
 
 
 def resolve_profile_home(profile: str | None = None, *, os_home: Path | None = None) -> Path:
@@ -39,6 +49,38 @@ def build_hermes_prompt(task: str) -> str:
 
 def build_hermes_argv(prompt: str) -> list[str]:
     return ["hermes", "chat", "-Q", "-q", prompt]
+
+
+def extract_safe_progress_summary(text: str, *, max_chars: int = 4000) -> str | None:
+    """Return a capped, redacted one-sentence progress summary or None if unsafe."""
+    if len(text) > max_chars:
+        return None
+    recent_text = text[-max_chars:]
+    if any(marker in recent_text for marker in _UNSAFE_PROGRESS_MARKERS):
+        return None
+    redacted = recent_text
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("[redacted]", redacted)
+    normalized = " ".join(redacted.split()).strip()
+    if not normalized:
+        return None
+    if len(normalized) > 160:
+        normalized = normalized[:159].rstrip() + "…"
+    return normalized
+
+
+def _lifecycle_status_message(status: str) -> str:
+    if status in {"running", "cancel_pending"}:
+        return _RUNNING_PROGRESS_FALLBACK
+    if status == "idle":
+        return "No Hermes jobs yet."
+    if status == "completed":
+        return _COMPLETED_STATUS_MESSAGE
+    if status in {"failed", "failed_orphaned"}:
+        return _FAILED_STATUS_MESSAGE
+    if status == "cancelled":
+        return _CANCELLED_STATUS_MESSAGE
+    return f"Hermes job is {status}"
 
 
 def _read_final_stdout(stdout_path: Path) -> str:
@@ -161,21 +203,22 @@ class HermesJobManager:
     async def get_status(self) -> dict[str, Any]:
         active = get_active_hermes_job(self._db_path)
         if active is not None:
+            safe_progress_summary = extract_safe_progress_summary(active.progress_summary) if active.progress_summary else None
             return {
                 "ok": True,
                 "status": active.status,
                 "job_id": active.id,
-                "progress_summary": active.progress_summary,
-                "message": active.progress_summary or "Hermes job is still running",
+                "progress_summary": safe_progress_summary,
+                "message": safe_progress_summary or _RUNNING_PROGRESS_FALLBACK,
             }
         latest = get_latest_hermes_job(self._db_path)
         if latest is None:
-            return {"ok": True, "status": "idle", "job_id": None, "message": "No Hermes jobs yet"}
+            return {"ok": True, "status": "idle", "job_id": None, "message": _lifecycle_status_message("idle")}
         return {
             "ok": True,
             "status": latest.status,
             "job_id": latest.id,
-            "message": latest.status_note or latest.final_result or f"Hermes job is {latest.status}",
+            "message": _lifecycle_status_message(latest.status),
         }
 
     async def request_cancel(self) -> dict[str, Any]:
