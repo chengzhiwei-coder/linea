@@ -11,7 +11,7 @@ from websockets.asyncio.client import ClientConnection, connect
 
 from linea_server.db import DEFAULT_DB_PATH
 from linea_server.tool_logs import finish_tool_call, start_tool_call
-from linea_server.tools import ToolRegistry, register_default_tools
+from linea_server.tools import DEFAULT_TIME_TOOL_SCHEMA, ToolRegistry, register_default_tools
 from linea_server.xai_config import XaiConfig
 
 logger = logging.getLogger(__name__)
@@ -19,23 +19,14 @@ logger = logging.getLogger(__name__)
 XAI_AUDIO_SAMPLE_RATE = 48_000
 
 
-TIME_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "name": "get_current_time",
-    "description": "Return the server local time as an ISO-8601 timestamp.",
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-}
+TIME_TOOL_SCHEMA = DEFAULT_TIME_TOOL_SCHEMA
 
 
 class XaiRealtimeError(RuntimeError):
     """Raised when xAI realtime reports a fatal provider error."""
 
 
-def build_session_update(config: XaiConfig) -> dict[str, Any]:
+def build_session_update(config: XaiConfig, tool_schemas: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "type": "session.update",
         "session": {
@@ -47,7 +38,7 @@ def build_session_update(config: XaiConfig) -> dict[str, Any]:
                 "input": {"format": {"type": "audio/pcm", "rate": XAI_AUDIO_SAMPLE_RATE}},
                 "output": {"format": {"type": "audio/pcm", "rate": XAI_AUDIO_SAMPLE_RATE}},
             },
-            "tools": [TIME_TOOL_SCHEMA],
+            "tools": tool_schemas or [TIME_TOOL_SCHEMA],
         },
     }
 
@@ -124,6 +115,7 @@ InputSpeechStartedCallback = Callable[[], None]
 class XaiToolCallRequest:
     call_id: str
     name: str
+    arguments: dict[str, Any]
 
 
 async def connect_xai_realtime(config: XaiConfig) -> RealtimeConnection:
@@ -146,7 +138,19 @@ def parse_tool_call_event(event: dict[str, Any]) -> XaiToolCallRequest | None:
     call_id = event.get("call_id")
     if not isinstance(name, str) or not isinstance(call_id, str):
         return None
-    return XaiToolCallRequest(call_id=call_id, name=name)
+    return XaiToolCallRequest(call_id=call_id, name=name, arguments=_parse_tool_arguments(event.get("arguments")))
+
+
+def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:
+    if arguments is None or arguments == "":
+        return {}
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        parsed = json.loads(arguments)
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("invalid tool arguments")
 
 
 class XaiRealtimeBridge:
@@ -195,7 +199,7 @@ class XaiRealtimeBridge:
                 return
             if self._connection is None:
                 self._connection = await self._connection_factory(self._config)
-            await self._connection.send_json(build_session_update(self._config))
+            await self._connection.send_json(build_session_update(self._config, self._tool_registry.tool_schemas()))
             self._record_call_activity()
             if self._initial_greeting_text is not None:
                 for event in build_initial_greeting_events(self._initial_greeting_text):
@@ -237,8 +241,14 @@ class XaiRealtimeBridge:
                 logger.error("xAI realtime provider error")
                 await self.close()
                 raise XaiRealtimeError(str(event.get("error") or event))
-            elif tool_call := parse_tool_call_event(event):
-                await self._handle_tool_call(tool_call)
+            elif event_type == "response.function_call_arguments.done":
+                try:
+                    tool_call = parse_tool_call_event(event)
+                except ValueError:
+                    await self._handle_invalid_tool_arguments(event)
+                    continue
+                if tool_call is not None:
+                    await self._handle_tool_call(tool_call)
 
     def _record_call_activity(self) -> None:
         if self._record_activity is not None:
@@ -248,7 +258,7 @@ class XaiRealtimeBridge:
         assert self._connection is not None
         tool_call_id = start_tool_call(self._db_path, tool_call.call_id, tool_call.name)
         try:
-            result = await self._tool_registry.call(tool_call.name)
+            result = await self._tool_registry.call(tool_call.name, tool_call.arguments)
         except asyncio.CancelledError:
             finish_tool_call(self._db_path, tool_call_id, "cancelled")
             raise
@@ -260,13 +270,27 @@ class XaiRealtimeBridge:
         if not self._is_tool_call_active(tool_call.call_id):
             return
 
+        await self._send_tool_output(tool_call.call_id, result)
+
+    async def _handle_invalid_tool_arguments(self, event: dict[str, Any]) -> None:
+        name = event.get("name")
+        call_id = event.get("call_id")
+        if not isinstance(name, str) or not isinstance(call_id, str):
+            return
+        tool_call_id = start_tool_call(self._db_path, call_id, name)
+        finish_tool_call(self._db_path, tool_call_id, "error")
+        if self._is_tool_call_active(call_id):
+            await self._send_tool_output(call_id, json.dumps({"ok": False, "error": "invalid tool arguments"}))
+
+    async def _send_tool_output(self, call_id: str, output: str) -> None:
+        assert self._connection is not None
         await self._connection.send_json(
             {
                 "type": "conversation.item.create",
                 "item": {
                     "type": "function_call_output",
-                    "call_id": tool_call.call_id,
-                    "output": result,
+                    "call_id": call_id,
+                    "output": output,
                 },
             }
         )

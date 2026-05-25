@@ -22,3 +22,28 @@ def test_build_session_update_declares_model_voice_and_time_tool():
     assert "input_audio_format" not in payload["session"]
     assert "output_audio_format" not in payload["session"]
     assert payload["session"]["tools"][0]["name"] == "get_current_time"
+
+
+def test_build_session_update_includes_all_provided_tool_schemas():
+    schemas = [
+        {
+            "type": "function",
+            "name": "run_hermes",
+            "description": "Run a Hermes task.",
+            "parameters": {
+                "type": "object",
+                "properties": {"task": {"type": "string"}},
+                "required": ["task"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "get_hermes_status",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    ]
+
+    payload = build_session_update(XaiConfig(api_key="secret"), tool_schemas=schemas)
+
+    assert payload["session"]["tools"] == schemas

@@ -8,6 +8,7 @@ from linea_server.xai_realtime import (
     XaiRealtimeBridge,
     XaiRealtimeError,
     build_session_update,
+    parse_tool_call_event,
 )
 
 
@@ -210,3 +211,58 @@ async def test_bridge_closes_connection_on_provider_error():
         await bridge.process_events()
 
     assert connection.closed is True
+
+
+def test_parse_tool_call_event_defaults_missing_arguments_to_empty_dict():
+    tool_call = parse_tool_call_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "name": "get_current_time",
+            "call_id": "call-1",
+        }
+    )
+
+    assert tool_call is not None
+    assert tool_call.arguments == {}
+
+
+def test_parse_tool_call_event_defaults_empty_arguments_to_empty_dict():
+    tool_call = parse_tool_call_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "name": "get_current_time",
+            "call_id": "call-1",
+            "arguments": "",
+        }
+    )
+
+    assert tool_call is not None
+    assert tool_call.arguments == {}
+
+
+def test_parse_tool_call_event_parses_json_string_arguments():
+    tool_call = parse_tool_call_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "name": "run_hermes",
+            "call_id": "call-1",
+            "arguments": '{"task":"write a note"}',
+        }
+    )
+
+    assert tool_call is not None
+    assert tool_call.arguments == {"task": "write a note"}
+
+
+def test_parse_tool_call_event_accepts_decoded_dict_arguments():
+    tool_call = parse_tool_call_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "name": "run_hermes",
+            "call_id": "call-1",
+            "arguments": {"task": "write a note"},
+        }
+    )
+
+    assert tool_call is not None
+    assert tool_call.arguments == {"task": "write a note"}

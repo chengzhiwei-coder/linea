@@ -222,3 +222,118 @@ async def test_xai_tool_call_logs_cancelled_when_shutdown_cancels_tool(tmp_path)
     assert rows[0][:3] == ("call-1", "get_current_time", "cancelled")
     assert rows[0][3] is not None
     assert [payload["type"] for payload in connection.sent] == ["session.update"]
+
+
+async def test_xai_tool_call_passes_parsed_arguments_to_registry_handler(tmp_path):
+    db_path = tmp_path / "linea.db"
+    initialize_db(db_path)
+    received_arguments = None
+
+    async def fake_hermes(arguments):
+        nonlocal received_arguments
+        received_arguments = arguments
+        return "started"
+
+    registry = ToolRegistry()
+    registry.register("run_hermes", fake_hermes)
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.function_call_arguments.done",
+                "name": "run_hermes",
+                "call_id": "call-1",
+                "arguments": '{"task":"write a note"}',
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        db_path=db_path,
+        tool_registry=registry,
+        is_tool_call_active=lambda call_id: call_id == "call-1",
+    )
+
+    await bridge.process_events()
+
+    assert received_arguments == {"task": "write a note"}
+    rows = fetch_tool_rows(db_path)
+    assert rows[0][:3] == ("call-1", "run_hermes", "success")
+    assert connection.sent[-2]["item"]["output"] == "started"
+
+
+async def test_xai_tool_call_sends_error_output_for_invalid_json_arguments(tmp_path):
+    db_path = tmp_path / "linea.db"
+    initialize_db(db_path)
+    executed = False
+
+    async def fake_hermes(arguments):
+        nonlocal executed
+        executed = True
+        return "started"
+
+    registry = ToolRegistry()
+    registry.register("run_hermes", fake_hermes)
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.function_call_arguments.done",
+                "name": "run_hermes",
+                "call_id": "call-1",
+                "arguments": "{not json}",
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        db_path=db_path,
+        tool_registry=registry,
+        is_tool_call_active=lambda call_id: call_id == "call-1",
+    )
+
+    await bridge.process_events()
+
+    assert executed is False
+    rows = fetch_tool_rows(db_path)
+    assert rows[0][:3] == ("call-1", "run_hermes", "error")
+    assert connection.sent[-2:] == [
+        {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": '{"ok": false, "error": "invalid tool arguments"}',
+            },
+        },
+        {"type": "response.create"},
+    ]
+
+
+async def test_bridge_advertises_tool_schemas_from_registry():
+    schema = {
+        "type": "function",
+        "name": "run_hermes",
+        "parameters": {
+            "type": "object",
+            "properties": {"task": {"type": "string"}},
+            "required": ["task"],
+            "additionalProperties": False,
+        },
+    }
+
+    async def fake_hermes(arguments):
+        return "started"
+
+    registry = ToolRegistry()
+    registry.register("run_hermes", fake_hermes, schema=schema)
+    connection = FakeRealtimeConnection([])
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        tool_registry=registry,
+    )
+
+    await bridge.start()
+
+    assert connection.sent[0]["session"]["tools"] == [schema]
