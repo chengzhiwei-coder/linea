@@ -52,6 +52,37 @@ def initialize_db(db_path: Path = DEFAULT_DB_PATH) -> InitializeDbResult:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hermes_jobs (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK (status IN (
+                    'running', 'completed', 'failed', 'failed_orphaned',
+                    'cancel_pending', 'cancelled'
+                )),
+                task TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                profile_home TEXT NOT NULL,
+                stdout_path TEXT NOT NULL,
+                stderr_path TEXT NOT NULL,
+                progress_summary TEXT,
+                final_result TEXT,
+                delivery_status TEXT NOT NULL DEFAULT 'requested',
+                pid INTEGER,
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at TEXT,
+                status_note TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_hermes_jobs_one_active
+            ON hermes_jobs ((1))
+            WHERE status IN ('running', 'cancel_pending')
+            """
+        )
 
         existing = conn.execute("SELECT token FROM server_auth WHERE id = 1").fetchone()
         if existing is not None:

@@ -16,7 +16,7 @@ def test_initialize_db_creates_required_tables(tmp_path):
 
     assert result.created_new_server_token is True
     assert result.plaintext_server_token is not None
-    assert table_names(db_path) >= {"server_auth", "tool_calls"}
+    assert table_names(db_path) >= {"server_auth", "tool_calls", "hermes_jobs"}
 
 
 def test_initialize_db_stores_server_token_for_restart_display(tmp_path):
