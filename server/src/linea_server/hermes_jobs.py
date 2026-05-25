@@ -75,8 +75,9 @@ def create_hermes_job(
     profile_home: Path,
     stdout_path: Path,
     stderr_path: Path,
+    job_id: str | None = None,
 ) -> HermesJob:
-    job_id = str(uuid4())
+    job_id = str(uuid4()) if job_id is None else job_id
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         active = conn.execute(
