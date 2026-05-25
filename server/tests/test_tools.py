@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime
 from typing import Any
@@ -142,6 +143,50 @@ async def test_run_hermes_task_returns_acknowledgement_json_not_final_result():
         "message": "Hermes started job job-123. I’ll send the result to Telegram when it finishes.",
         "job_id": "job-123",
     }
+
+
+async def test_run_hermes_task_start_survives_cancelled_voice_call_handler():
+    class SlowStartHermesJobManager:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.cancelled = False
+            self.completed = False
+
+        async def start_task(self, task: str) -> dict[str, Any]:
+            assert task == "Keep going"
+            self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            self.completed = True
+            return {"ok": True, "status": "running", "job_id": "job-123", "message": "Hermes job started"}
+
+        async def get_status(self) -> dict[str, Any]:
+            return {"ok": True, "status": "running", "job_id": "job-123"}
+
+        async def request_cancel(self) -> dict[str, Any]:
+            return {"ok": True, "status": "cancel_pending", "job_id": "job-123"}
+
+        async def confirm_cancel(self) -> dict[str, Any]:
+            return {"ok": True, "status": "cancel_pending", "job_id": "job-123"}
+
+    manager = SlowStartHermesJobManager()
+    registry = ToolRegistry()
+    register_default_tools(registry, hermes_job_manager=manager)
+    call_task = asyncio.create_task(registry.call("run_hermes_task", {"task": "Keep going"}))
+
+    await manager.started.wait()
+    call_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call_task
+    manager.release.set()
+    await asyncio.sleep(0)
+
+    assert manager.cancelled is False
+    assert manager.completed is True
 
 
 async def test_get_hermes_status_returns_one_short_sentence_in_json_payload():

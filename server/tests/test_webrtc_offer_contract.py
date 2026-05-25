@@ -66,6 +66,8 @@ async def test_webrtc_offer_returns_real_answer_for_valid_offer(tmp_path):
     assert "stub-answer-sdp" not in body["sdp"]
     assert app.state.xai_bridge._initial_greeting_text == "Hey, how can I help you?"
     assert app.state.xai_bridge._on_input_speech_started is not None
+    tool_names = {schema["name"] for schema in app.state.xai_bridge._tool_registry.tool_schemas()}
+    assert {"run_hermes_task", "get_hermes_status", "cancel_hermes_task"} <= tool_names
     assert app.state.xai_bridge._is_tool_call_active("provider-tool-call-id") is True
     app.state.call_manager.release_call(body["call_id"])
     assert app.state.xai_bridge._is_tool_call_active("provider-tool-call-id") is False
@@ -89,6 +91,18 @@ async def test_webrtc_offer_rejects_second_active_call(tmp_path):
 
 async def test_manual_webrtc_stop_releases_call_before_idle_timeout(tmp_path):
     app = create_app(db_path=tmp_path / "linea.db")
+    cancel_calls = []
+
+    async def track_request_cancel():
+        cancel_calls.append("request")
+        return {"ok": True}
+
+    async def track_confirm_cancel():
+        cancel_calls.append("confirm")
+        return {"ok": True}
+
+    app.state.hermes_job_manager.request_cancel = track_request_cancel
+    app.state.hermes_job_manager.confirm_cancel = track_confirm_cancel
     token = app.state.initial_server_token
     headers = {"Authorization": f"Bearer {token}"}
     payload = {"type": "offer", "sdp": await create_audio_offer_sdp()}
@@ -103,6 +117,7 @@ async def test_manual_webrtc_stop_releases_call_before_idle_timeout(tmp_path):
     assert stopped.status_code == 204
     assert second.status_code == 200
     assert second.json()["call_id"] != call_id
+    assert cancel_calls == []
     await close_webrtc_service(app)
 
 

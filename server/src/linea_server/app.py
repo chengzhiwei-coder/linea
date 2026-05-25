@@ -11,6 +11,8 @@ from linea_server.auth import require_bearer_auth
 from linea_server.internal_test_page import CONVERSATION_TEST_HTML
 from linea_server.calls import CallManager, WebRtcOfferRequest, WebRtcOfferResponse
 from linea_server.db import DEFAULT_DB_PATH, initialize_db
+from linea_server.hermes_runner import HermesJobManager
+from linea_server.tools import ToolRegistry, register_default_tools
 from linea_server.webrtc import AiortcWebRtcService
 from linea_server.xai_config import load_xai_config
 from linea_server.xai_realtime import XaiRealtimeBridge
@@ -18,6 +20,12 @@ from linea_server.xai_realtime import XaiRealtimeBridge
 logger = logging.getLogger(__name__)
 
 INITIAL_GREETING_TEXT = "Hey, how can I help you?"
+
+
+def build_tool_registry(hermes_job_manager: HermesJobManager) -> ToolRegistry:
+    registry = ToolRegistry()
+    register_default_tools(registry, hermes_job_manager=hermes_job_manager)
+    return registry
 
 
 async def end_active_call(app: Any, call_id: str) -> None:
@@ -79,8 +87,13 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
     app.state.db_path = db_path
     app.state.initial_server_token = init_result.plaintext_server_token
     app.state.call_manager = CallManager()
+    app.state.hermes_job_manager = HermesJobManager(db_path=db_path)
     app.state.xai_config = load_xai_config()
-    app.state.xai_bridge = XaiRealtimeBridge(app.state.xai_config)
+    app.state.xai_bridge = XaiRealtimeBridge(
+        app.state.xai_config,
+        db_path=db_path,
+        tool_registry=build_tool_registry(app.state.hermes_job_manager),
+    )
     app.state.webrtc_service = AiortcWebRtcService(
         audio_sink=app.state.xai_bridge.send_audio_frame,
         audio_source=app.state.xai_bridge.receive_audio_frame,
@@ -143,6 +156,8 @@ def create_app(db_path: Path = DEFAULT_DB_PATH) -> FastAPI:
 
             app.state.xai_bridge = XaiRealtimeBridge(
                 app.state.xai_config,
+                db_path=db_path,
+                tool_registry=build_tool_registry(app.state.hermes_job_manager),
                 record_activity=activity_callback,
                 is_tool_call_active=lambda _tool_call_id, call_id=call_id: app.state.call_manager.active_call_id
                 == call_id,

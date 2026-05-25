@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -132,13 +133,24 @@ def _short_status_message(result: dict[str, Any]) -> str:
     return f"Hermes job is {status}." if isinstance(status, str) else "Hermes status is unavailable."
 
 
+def _discard_cancelled_handler_task_exception(task: asyncio.Task[dict[str, Any]]) -> None:
+    if task.cancelled():
+        return
+    task.exception()
+
+
 def register_default_tools(registry: ToolRegistry, hermes_job_manager: Any | None = None) -> None:
     registry.register("get_current_time", _get_current_time_tool, schema=DEFAULT_TIME_TOOL_SCHEMA)
     if hermes_job_manager is None:
         return
 
     async def run_hermes_task(arguments: dict[str, Any]) -> str:
-        result = await hermes_job_manager.start_task(str(arguments["task"]))
+        start_task = asyncio.create_task(hermes_job_manager.start_task(str(arguments["task"])))
+        try:
+            result = await asyncio.shield(start_task)
+        except asyncio.CancelledError:
+            start_task.add_done_callback(_discard_cancelled_handler_task_exception)
+            raise
         job_id = result.get("job_id")
         if result.get("ok") is True:
             message = f"Hermes started job {job_id}. I’ll send the result to Telegram when it finishes."
