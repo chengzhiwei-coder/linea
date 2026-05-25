@@ -1,10 +1,12 @@
 import asyncio
+import json
 import sqlite3
+from typing import Any
 
 import pytest
 
 from linea_server.db import initialize_db
-from linea_server.tools import ToolRegistry
+from linea_server.tools import ToolRegistry, register_default_tools
 from linea_server.xai_config import XaiConfig
 from linea_server.xai_realtime import XaiRealtimeBridge
 
@@ -35,6 +37,43 @@ def fetch_tool_rows(db_path):
         return conn.execute(
             "SELECT call_id, tool_name, status, finished_at FROM tool_calls ORDER BY id"
         ).fetchall()
+
+
+class FakeHermesJobManager:
+    def __init__(self) -> None:
+        self.started_tasks: list[str] = []
+        self.cancel_requested = False
+        self.cancel_confirmed = False
+
+    async def start_task(self, task: str) -> dict[str, Any]:
+        self.started_tasks.append(task)
+        return {"ok": True, "status": "running", "job_id": "job-123", "message": "Hermes job started"}
+
+    async def get_status(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "running",
+            "job_id": "job-123",
+            "progress_summary": "Hermes is checking Linea status.",
+        }
+
+    async def request_cancel(self) -> dict[str, Any]:
+        self.cancel_requested = True
+        return {
+            "ok": True,
+            "status": "cancel_pending",
+            "job_id": "job-123",
+            "message": "Please confirm cancellation before I terminate Hermes.",
+        }
+
+    async def confirm_cancel(self) -> dict[str, Any]:
+        self.cancel_confirmed = True
+        return {
+            "ok": True,
+            "status": "cancel_pending",
+            "job_id": "job-123",
+            "message": "Hermes job termination requested.",
+        }
 
 
 async def test_xai_get_current_time_tool_call_logs_executes_and_sends_result_when_active(tmp_path):
@@ -222,6 +261,196 @@ async def test_xai_tool_call_logs_cancelled_when_shutdown_cancels_tool(tmp_path)
     assert rows[0][:3] == ("call-1", "get_current_time", "cancelled")
     assert rows[0][3] is not None
     assert [payload["type"] for payload in connection.sent] == ["session.update"]
+
+
+async def test_xai_run_hermes_task_function_call_returns_ack_without_waiting_for_final_completion(tmp_path):
+    db_path = tmp_path / "linea.db"
+    initialize_db(db_path)
+    manager = FakeHermesJobManager()
+    registry = ToolRegistry()
+    register_default_tools(registry, hermes_job_manager=manager)
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.function_call_arguments.done",
+                "name": "run_hermes_task",
+                "call_id": "call-run",
+                "arguments": '{"task":"check Linea status"}',
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        db_path=db_path,
+        tool_registry=registry,
+        is_tool_call_active=lambda call_id: call_id == "call-run",
+    )
+
+    await bridge.process_events()
+
+    assert manager.started_tasks == ["check Linea status"]
+    output = json.loads(connection.sent[-2]["item"]["output"])
+    assert output == {
+        "ok": True,
+        "message": "Hermes started job job-123. I’ll send the result to Telegram when it finishes.",
+        "job_id": "job-123",
+    }
+    assert connection.sent[-1] == {"type": "response.create"}
+    assert fetch_tool_rows(db_path)[0][:3] == ("call-run", "run_hermes_task", "success")
+
+
+async def test_xai_get_hermes_status_function_call_returns_short_progress_sentence(tmp_path):
+    db_path = tmp_path / "linea.db"
+    initialize_db(db_path)
+    manager = FakeHermesJobManager()
+    registry = ToolRegistry()
+    register_default_tools(registry, hermes_job_manager=manager)
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.function_call_arguments.done",
+                "name": "get_hermes_status",
+                "call_id": "call-status",
+                "arguments": "{}",
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        db_path=db_path,
+        tool_registry=registry,
+        is_tool_call_active=lambda call_id: call_id == "call-status",
+    )
+
+    await bridge.process_events()
+
+    output = json.loads(connection.sent[-2]["item"]["output"])
+    assert output == {
+        "ok": True,
+        "message": "Hermes is checking Linea status.",
+        "job_id": "job-123",
+        "status": "running",
+    }
+    assert fetch_tool_rows(db_path)[0][:3] == ("call-status", "get_hermes_status", "success")
+
+
+async def test_xai_cancel_hermes_task_without_confirm_asks_for_confirmation(tmp_path):
+    db_path = tmp_path / "linea.db"
+    initialize_db(db_path)
+    manager = FakeHermesJobManager()
+    registry = ToolRegistry()
+    register_default_tools(registry, hermes_job_manager=manager)
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.function_call_arguments.done",
+                "name": "cancel_hermes_task",
+                "call_id": "call-cancel-request",
+                "arguments": "{}",
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        db_path=db_path,
+        tool_registry=registry,
+        is_tool_call_active=lambda call_id: call_id == "call-cancel-request",
+    )
+
+    await bridge.process_events()
+
+    output = json.loads(connection.sent[-2]["item"]["output"])
+    assert output == {
+        "ok": True,
+        "message": "Please confirm cancellation before I terminate Hermes.",
+        "job_id": "job-123",
+        "status": "cancel_pending",
+    }
+    assert manager.cancel_requested is True
+    assert manager.cancel_confirmed is False
+    assert fetch_tool_rows(db_path)[0][:3] == ("call-cancel-request", "cancel_hermes_task", "success")
+
+
+async def test_xai_cancel_hermes_task_with_confirm_cancels_active_job(tmp_path):
+    db_path = tmp_path / "linea.db"
+    initialize_db(db_path)
+    manager = FakeHermesJobManager()
+    registry = ToolRegistry()
+    register_default_tools(registry, hermes_job_manager=manager)
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.function_call_arguments.done",
+                "name": "cancel_hermes_task",
+                "call_id": "call-cancel-confirm",
+                "arguments": '{"confirm":true}',
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        db_path=db_path,
+        tool_registry=registry,
+        is_tool_call_active=lambda call_id: call_id == "call-cancel-confirm",
+    )
+
+    await bridge.process_events()
+
+    output = json.loads(connection.sent[-2]["item"]["output"])
+    assert output == {
+        "ok": True,
+        "message": "Hermes job termination requested.",
+        "job_id": "job-123",
+        "status": "cancel_pending",
+    }
+    assert manager.cancel_requested is False
+    assert manager.cancel_confirmed is True
+    assert fetch_tool_rows(db_path)[0][:3] == ("call-cancel-confirm", "cancel_hermes_task", "success")
+
+
+async def test_xai_tool_call_log_records_started_status_while_handler_is_running(tmp_path):
+    db_path = tmp_path / "linea.db"
+    initialize_db(db_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_tool(arguments):
+        started.set()
+        await release.wait()
+        return "done"
+
+    registry = ToolRegistry()
+    registry.register("slow_tool", slow_tool)
+    connection = FakeRealtimeConnection(
+        [
+            {
+                "type": "response.function_call_arguments.done",
+                "name": "slow_tool",
+                "call_id": "call-started",
+                "arguments": "{}",
+            }
+        ]
+    )
+    bridge = XaiRealtimeBridge(
+        XaiConfig(api_key="secret"),
+        connection=connection,
+        db_path=db_path,
+        tool_registry=registry,
+        is_tool_call_active=lambda call_id: call_id == "call-started",
+    )
+
+    process_task = asyncio.create_task(bridge.process_events())
+    await started.wait()
+
+    assert fetch_tool_rows(db_path)[0][:3] == ("call-started", "slow_tool", "started")
+
+    release.set()
+    await process_task
+    assert fetch_tool_rows(db_path)[0][:3] == ("call-started", "slow_tool", "success")
 
 
 async def test_xai_tool_call_passes_parsed_arguments_to_registry_handler(tmp_path):
